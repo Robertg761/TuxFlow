@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=TuxFlow
+Comment=Private local voice dictation powered by Whisper
+Exec=tuxflow app
+Icon=io.github.tuxflow.TuxFlow
+Terminal=false
+Type=Application
+Categories=Utility;Accessibility;
+Keywords=dictation;whisper;speech;voice;transcription;
+StartupNotify=true
+DBusActivatable=false

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tuxflow"
+version = "0.1.0"
+description = "Private, local-first voice dictation for Linux powered by Whisper"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "TuxFlow contributors" }]
+keywords = ["linux", "dictation", "whisper", "speech-to-text", "wayland"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: X11 Applications :: GTK",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+dependencies = ["dbus-next>=0.2.3"]
+
+[project.optional-dependencies]
+speech = ["faster-whisper>=1.2.1"]
+dev = ["pytest>=8", "ruff>=0.12"]
+
+[project.scripts]
+tuxflow = "tuxflow.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+ignore = ["BLE001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

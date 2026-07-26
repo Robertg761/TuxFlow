@@ -1,0 +1,13 @@
+[Unit]
+Description=TuxFlow local voice dictation
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/tuxflow daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

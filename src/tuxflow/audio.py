@@ -36,6 +36,19 @@ def _last_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+def _restrict(path: Path) -> None:
+    """Keep a recording readable only by its owner.
+
+    The WAV is created by the recorder subprocess under the daemon's umask —
+    normally 0644 — so the mode can only be tightened once the file exists,
+    not at open time.
+    """
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 class RecordingError(RuntimeError):
     pass
 
@@ -233,6 +246,9 @@ class CommandRecorder:
             failure = self._spawn(backend, path, device)
             if not failure:
                 return
+        # A recorder that failed may still have created the WAV before giving
+        # up, and nothing will ever come back for it once start() has raised.
+        path.unlink(missing_ok=True)
         raise RecordingError(failure)
 
     def _spawn(self, backend: RecorderBackend, path: Path, device: str) -> str:
@@ -261,6 +277,9 @@ class CommandRecorder:
             stderr = self._read_stderr()
             self._reset()
             return stderr or f"{backend.name} recording exited immediately"
+        # The recorder has opened the WAV by now, so this is the first moment
+        # the audio can be taken away from other local users.
+        _restrict(path)
         return ""
 
     def _read_stderr(self) -> str:
@@ -306,6 +325,10 @@ class CommandRecorder:
             # is only ever a detail, so it does not get to replace it.
             detail = f" ({reason})" if reason else ""
             raise RecordingError(f"The microphone recording was empty{detail}")
+        # Repeated in case the recorder replaced the file it was given: FFmpeg
+        # does exactly that with -y. A kept recording lives on in the cache, so
+        # this is the mode it ends up with on disk.
+        _restrict(path)
         return Recording(path=path, duration_seconds=duration)
 
     def cancel(self) -> Path | None:

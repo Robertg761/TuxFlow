@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,6 +49,19 @@ class HistoryStore:
                 )
                 """
             )
+        self._restrict()
+
+    def _restrict(self) -> None:
+        """Keep the transcripts readable only by their owner.
+
+        SQLite creates the database with the process umask, which normally
+        means 0644. Doing this on every open also heals a database an older
+        version left world-readable.
+        """
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
 
     def add(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -27,6 +28,20 @@ def _wait_for_exit(recorder: audio.CommandRecorder, timeout: float = 5.0) -> Non
     deadline = time.monotonic() + timeout
     while recorder.is_recording and time.monotonic() < deadline:
         time.sleep(0.02)
+
+
+@pytest.fixture
+def permissive_umask():
+    """Prove the mode comes from the code and not from a strict umask."""
+    previous = os.umask(0o000)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+def _mode(path: Path) -> int:
+    return os.stat(path).st_mode & 0o777
 
 
 def test_each_platform_prefers_its_native_recorder(monkeypatch):
@@ -160,6 +175,49 @@ def test_a_chatty_recorder_keeps_recording(tmp_path):
     assert result.duration_seconds > 0
 
 
+def test_a_recording_stops_being_world_readable_as_soon_as_it_exists(tmp_path, permissive_umask):
+    recorder = audio.CommandRecorder(
+        _scripted_backend(
+            "import signal, sys, time;"
+            " signal.signal(signal.SIGINT, lambda *a: sys.exit(0)); time.sleep(30)"
+        )
+    )
+    path = tmp_path / "clip.wav"
+    # Stand in for the WAV the recorder opens the moment it starts, with the
+    # 0644 a subprocess gives it.
+    path.write_bytes(b"\0" * 128)
+    path.chmod(0o644)
+
+    recorder.start(path)
+    assert _mode(path) == 0o600
+
+    # A kept recording lives on in the cache, so it has to stay private there.
+    result = recorder.stop()
+    assert _mode(result.path) == 0o600
+
+
+def test_restricting_a_recording_that_never_appeared_is_not_an_error(tmp_path):
+    audio._restrict(tmp_path / "missing.wav")
+
+
+def test_a_recorder_that_never_starts_leaves_no_audio_behind(
+    tmp_path, pretend_everything_is_installed
+):
+    recorder = audio.CommandRecorder(audio.FFMPEG_AVFOUNDATION)
+    path = tmp_path / "clip.wav"
+
+    def fake_spawn(_backend, spawn_path, _device):
+        # A recorder can create the WAV and then die on the device it was given.
+        spawn_path.write_bytes(b"\0" * 44)
+        return "Input/output error"
+
+    recorder._spawn = fake_spawn  # type: ignore[method-assign]
+    with pytest.raises(audio.RecordingError, match="Input/output error"):
+        recorder.start(path)
+
+    assert not path.exists()
+
+
 def test_only_the_last_line_of_a_recorder_complaint_is_shown():
     assert audio._last_line("ffmpeg version 7.1\n\nInput/output error\n") == "Input/output error"
     assert audio._last_line("   \n") == ""
@@ -174,3 +232,24 @@ def test_sox_takes_its_device_from_the_environment(tmp_path):
     # sox has no device flag, so the name must not leak into the command line.
     assert "MacBook Pro Microphone" not in audio.SOX.arguments(tmp_path / "clip.wav", "ignored")
     assert audio.CommandRecorder(audio.SOX)._environment(audio.SOX) is None
+
+
+def test_cancelling_stops_the_recorder_and_throws_the_audio_away(tmp_path):
+    # A recorder that ignores the polite stop signal, as a wedged one would.
+    recorder = audio.CommandRecorder(
+        _scripted_backend(
+            "import signal, time; signal.signal(signal.SIGINT, signal.SIG_IGN);"
+            " open({path}, 'wb').write(b'\\0' * 128); time.sleep(30)"
+        )
+    )
+    path = tmp_path / "clip.wav"
+    recorder.start(path)
+    process = recorder._process
+
+    assert recorder.cancel() == path
+    assert process is not None and process.poll() is not None
+    assert not recorder.is_recording
+    # A cancelled dictation is one the user never wants to see again.
+    assert not path.exists()
+    # Cancelling when nothing is running is harmless.
+    assert recorder.cancel() is None

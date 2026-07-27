@@ -59,6 +59,12 @@ def models_dir() -> Path:
     return data_dir() / "models"
 
 
+# Everything TuxFlow stores is private to one user: settings, transcripts, and
+# any retained audio. On a shared machine the default 0755 would hand all of it
+# to every other local account, so the directories are owner-only.
+PRIVATE_DIR_MODE = 0o700
+
+
 def ensure_directories() -> None:
     for path in (
         config_dir(),
@@ -68,4 +74,13 @@ def ensure_directories() -> None:
         recordings_dir(),
         models_dir(),
     ):
-        path.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+        # mkdir only sets the mode when it creates the directory, and it is
+        # further masked by the umask, so directories from older installs (and
+        # from a permissive umask) are tightened explicitly.
+        try:
+            path.chmod(PRIVATE_DIR_MODE)
+        except OSError:
+            # A directory someone else owns is not ours to fix, and failing to
+            # start over it would be worse than leaving it alone.
+            pass

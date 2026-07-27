@@ -58,8 +58,11 @@ def _open_app() -> int:
 def _control(command: str) -> int:
     try:
         response = asyncio.run(send_command(command))
-    except RuntimeError as error:
-        print(error, file=sys.stderr)
+    except Exception as error:
+        # send_command raises RuntimeError with a readable sentence, but a
+        # traceback is never the right answer for `tuxflow stop`, whatever
+        # slipped through — and some exceptions stringify to nothing.
+        print(str(error) or f"`tuxflow {command}` failed: {type(error).__name__}", file=sys.stderr)
         return 1
     print(json.dumps(response, indent=2))
     return 0 if response.get("ok") else 1

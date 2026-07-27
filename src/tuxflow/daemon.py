@@ -14,7 +14,12 @@ from tuxflow.audio import RecordingError, create_recorder
 from tuxflow.config import ConfigStore, Settings
 from tuxflow.engine import EngineUnavailableError, WhisperEngine
 from tuxflow.history import HistoryStore
-from tuxflow.insertion import insert_text, prepare_input_backend, shutdown_input_backend
+from tuxflow.insertion import (
+    InsertResult,
+    insert_text,
+    prepare_input_backend,
+    shutdown_input_backend,
+)
 from tuxflow.notify import notify
 from tuxflow.paths import ensure_directories, models_dir, recordings_dir, socket_file
 from tuxflow.shortcuts import (
@@ -30,6 +35,12 @@ from tuxflow.tray import TrayIndicator
 # tap macOS switched off, a stuck portal. Without a ceiling the daemon would
 # record until it was restarted and fill the disk with one WAV.
 MAX_RECORDING_SECONDS = 600.0
+
+# Opening the microphone takes long enough (device setup plus the recorder's
+# settle pause) that a quick tap can release the shortcut before the stream is
+# live. "starting" claims the recording early so that release is not dropped;
+# it is an internal step, and clients are told "recording" for both.
+ACTIVE_STATES = ("starting", "recording")
 
 
 class TuxFlowDaemon:
@@ -57,9 +68,12 @@ class TuxFlowDaemon:
         self._recording_watchdog: asyncio.Task[None] | None = None
 
     def status(self) -> dict[str, Any]:
+        # "starting" is a private step of start_recording; the tray, the desktop
+        # app, and `tuxflow status` only know the three settled states.
+        state = "recording" if self.state == "starting" else self.state
         return {
             "ok": True,
-            "state": self.state,
+            "state": state,
             "recording": self.recorder.is_recording,
             "shortcut": self.shortcut,
             "last_error": self.last_error,
@@ -108,7 +122,9 @@ class TuxFlowDaemon:
         await self.start_recording()
 
     async def _on_shortcut_released(self, _shortcut_id: str) -> None:
-        if self.state == "recording":
+        # A release during "starting" waits on the operation lock inside
+        # stop_recording, so it takes effect the moment the stream is live.
+        if self.state in ACTIVE_STATES:
             await self.stop_recording()
 
     async def _handle_client(
@@ -155,7 +171,7 @@ class TuxFlowDaemon:
     async def toggle(self) -> None:
         if self.state == "idle":
             await self.start_recording()
-        elif self.state == "recording":
+        elif self.state in ACTIVE_STATES:
             await self.stop_recording()
 
     async def start_recording(self) -> None:
@@ -167,9 +183,13 @@ class TuxFlowDaemon:
             # next dictation instead of waiting for a service restart.
             self.recorder.device = self.config_store.load().audio_device
             path = recordings_dir() / f"{uuid.uuid4().hex}.wav"
+            # Claim the recording before the blocking open, so a release that
+            # arrives while the microphone is still coming up is not ignored.
+            self.state = "starting"
             try:
                 await asyncio.to_thread(self.recorder.start, path)
             except RecordingError as error:
+                self.state = "idle"
                 self.last_error = str(error)
                 self.tray.update("error", self.last_error)
                 notify("Could not start dictation", self.last_error, urgency="critical")
@@ -244,6 +264,24 @@ class TuxFlowDaemon:
             self._engine_key = key
         return self._engine
 
+    def _report_insertion(self, result: InsertResult, text: str, settings: Settings) -> None:
+        """Surface a clipboard or paste failure the way every other failure is surfaced.
+
+        Silence here used to look exactly like success: the words were gone and
+        nothing said why.
+        """
+        # An empty transcript is a bare "press enter" command, which has nothing
+        # to paste, so a false paste is expected there.
+        paste_missing = settings.auto_paste and bool(text) and not result.pasted
+        if result.copied and not paste_missing:
+            return
+        self.last_error = result.detail
+        self.tray.update("error", self.last_error)
+        if result.copied:
+            notify("Could not paste the transcript", self.last_error, urgency="normal")
+        else:
+            notify("Could not insert the transcript", self.last_error, urgency="critical")
+
     async def _transcribe(self, path: Path, duration_seconds: float) -> None:
         settings = self.config_store.load()
         engine = self._get_engine(settings)
@@ -252,19 +290,24 @@ class TuxFlowDaemon:
             processed = process_text(transcript.text, settings)
             if not processed.text and not processed.press_enter:
                 return
-            await asyncio.to_thread(
+            insertion = await asyncio.to_thread(
                 insert_text,
                 processed.text,
                 auto_paste=settings.auto_paste,
                 send_enter=processed.press_enter,
             )
-            self.history.add(
+            # The transcript is kept whatever happened to the clipboard, so a
+            # failed paste never loses the words. sqlite opens and commits on
+            # the calling thread, which would otherwise stall every IPC client.
+            await asyncio.to_thread(
+                self.history.add,
                 text=processed.text,
                 raw_text=transcript.text,
                 language=transcript.language,
                 duration_seconds=duration_seconds,
                 model=settings.model,
             )
+            self._report_insertion(insertion, processed.text, settings)
         except EngineUnavailableError as error:
             self.last_error = str(error)
             self.tray.update("error", self.last_error)

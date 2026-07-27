@@ -19,6 +19,7 @@ from tuxflow.notify import notify
 from tuxflow.paths import ensure_directories, models_dir, recordings_dir, socket_file
 from tuxflow.portal import GlobalShortcutsPortal, PortalUnavailableError
 from tuxflow.text import process_text
+from tuxflow.tray import TrayIndicator
 
 
 class TuxFlowDaemon:
@@ -31,6 +32,7 @@ class TuxFlowDaemon:
             self._on_shortcut_pressed,
             self._on_shortcut_released,
         )
+        self.tray = TrayIndicator()
         self.server: asyncio.AbstractServer | None = None
         self.state = "idle"
         self.last_error = ""
@@ -56,6 +58,7 @@ class TuxFlowDaemon:
         path.unlink(missing_ok=True)
         self.server = await asyncio.start_unix_server(self._handle_client, path=path)
         path.chmod(0o600)
+        await self.tray.start()
         await asyncio.to_thread(prepare_input_backend)
         self._portal_task = asyncio.create_task(self._setup_portal())
         async with self.server:
@@ -70,8 +73,8 @@ class TuxFlowDaemon:
         except (PortalUnavailableError, TimeoutError) as error:
             self.last_error = str(error)
             self.shortcut = "Use `tuxflow toggle` or configure a desktop shortcut"
+            self.tray.update("error", self.last_error)
             notify("TuxFlow shortcut needs attention", self.last_error, urgency="normal")
-        notify("TuxFlow is ready", self.shortcut)
 
     async def shutdown(self) -> None:
         self.recorder.cancel()
@@ -80,6 +83,7 @@ class TuxFlowDaemon:
             if task and not task.done():
                 task.cancel()
         self.portal.close()
+        self.tray.close()
         if self.server:
             self.server.close()
             await self.server.wait_closed()
@@ -138,8 +142,6 @@ class TuxFlowDaemon:
             await self.start_recording()
         elif self.state == "recording":
             await self.stop_recording()
-        elif self.state == "processing":
-            notify("TuxFlow is still transcribing", "Please wait for the current dictation")
 
     async def start_recording(self) -> None:
         async with self._operation_lock:
@@ -151,10 +153,11 @@ class TuxFlowDaemon:
                 await asyncio.to_thread(self.recorder.start, path)
             except RecordingError as error:
                 self.last_error = str(error)
+                self.tray.update("error", self.last_error)
                 notify("Could not start dictation", self.last_error, urgency="critical")
                 return
             self.state = "recording"
-            notify("Listening…", "Release the shortcut to transcribe")
+            self.tray.update("recording")
 
     async def stop_recording(self) -> None:
         async with self._operation_lock:
@@ -165,10 +168,11 @@ class TuxFlowDaemon:
             except RecordingError as error:
                 self.state = "idle"
                 self.last_error = str(error)
+                self.tray.update("error", self.last_error)
                 notify("Recording failed", self.last_error, urgency="critical")
                 return
             self.state = "processing"
-            notify("Transcribing…", "Whisper is running locally")
+            self.tray.update("processing")
 
         self._transcription_task = asyncio.create_task(
             self._finish_transcription(recording.path, recording.duration_seconds)
@@ -179,13 +183,14 @@ class TuxFlowDaemon:
             await self._transcribe(path, duration_seconds)
         finally:
             self.state = "idle"
+            self.tray.update("error" if self.last_error else "idle", self.last_error)
 
     async def cancel_recording(self) -> None:
         async with self._operation_lock:
             if self.state == "recording":
                 await asyncio.to_thread(self.recorder.cancel)
                 self.state = "idle"
-                notify("Dictation cancelled")
+                self.tray.update("idle")
 
     def _get_engine(self, settings: Settings) -> WhisperEngine:
         key = (settings.model, settings.device, settings.compute_type)
@@ -206,9 +211,8 @@ class TuxFlowDaemon:
             transcript = await asyncio.to_thread(engine.transcribe, path, settings.language)
             processed = process_text(transcript.text, settings)
             if not processed.text and not processed.press_enter:
-                notify("No speech detected", "Nothing was inserted")
                 return
-            result = await asyncio.to_thread(
+            await asyncio.to_thread(
                 insert_text,
                 processed.text,
                 auto_paste=settings.auto_paste,
@@ -221,12 +225,13 @@ class TuxFlowDaemon:
                 duration_seconds=duration_seconds,
                 model=settings.model,
             )
-            notify("Dictation ready", result.detail)
         except EngineUnavailableError as error:
             self.last_error = str(error)
+            self.tray.update("error", self.last_error)
             notify("Transcription failed", self.last_error, urgency="critical")
         except Exception as error:
             self.last_error = f"Unexpected transcription error: {error}"
+            self.tray.update("error", self.last_error)
             notify("Transcription failed", self.last_error, urgency="critical")
         finally:
             if not settings.keep_audio:

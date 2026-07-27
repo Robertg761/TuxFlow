@@ -21,8 +21,16 @@ from tuxflow.config import ConfigStore, Replacement, Snippet
 from tuxflow.history import HistoryStore
 from tuxflow.ipc import send_command
 from tuxflow.paths import socket_file
+from tuxflow.system import is_macos, os_label
 
 MODELS = ["tiny", "base", "small", "medium", "large-v3", "turbo"]
+# Populated on macOS only; Linux shortcuts are owned by the desktop portal.
+MAC_HOTKEYS = [
+    ("Hold 🌐 fn", "fn"),
+    ("Hold right ⌘ Command", "right_command"),
+    ("Hold right ⌥ Option", "right_option"),
+    ("Hold right ⌃ Control", "right_control"),
+]
 LANGUAGES = [
     ("Auto detect", "auto"),
     ("English", "en"),
@@ -125,7 +133,7 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
         header.set_title_widget(
-            Adw.WindowTitle(title="TuxFlow", subtitle="Private Linux dictation")
+            Adw.WindowTitle(title="TuxFlow", subtitle=f"Private dictation on {os_label()}")
         )
         toolbar.add_top_bar(header)
 
@@ -245,7 +253,11 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         )
         self.language_row.connect("notify::selected", self._language_changed)
         group.add(self.language_row)
+        group.add(self._build_microphone_row())
         box.append(group)
+
+        if is_macos():
+            box.append(self._build_hotkey_group())
 
         behavior = Adw.PreferencesGroup(title="Behavior")
         behavior.add(
@@ -278,6 +290,47 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         )
         box.append(behavior)
         return page
+
+    def _build_microphone_row(self) -> Adw.EntryRow:
+        # The value is handed to whichever recorder this machine uses, so the
+        # hint has to name what that recorder expects.
+        hint = (
+            "AVFoundation device, such as :0 or :1"
+            if is_macos()
+            else "PipeWire target or ALSA device, such as alsa_input.pci-0000_00_1f.3"
+        )
+        row = Adw.EntryRow(title="Microphone (leave empty for the system default)")
+        row.set_text(self.settings.audio_device)
+        row.set_tooltip_text(hint)
+        row.set_show_apply_button(True)
+        row.connect("apply", self._audio_device_changed)
+        self.audio_device_row = row
+        return row
+
+    def _audio_device_changed(self, row: Adw.EntryRow) -> None:
+        self.settings.audio_device = row.get_text().strip()
+        self._save_settings()
+
+    def _build_hotkey_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(title="Dictation shortcut")
+        group.set_description(
+            "Hold the key while you speak. TuxFlow needs Accessibility access in "
+            "System Settings › Privacy & Security, and the service restarts to "
+            "pick up a new key."
+        )
+        labels = [label for label, _key in MAC_HOTKEYS]
+        keys = [key for _label, key in MAC_HOTKEYS]
+        self.hotkey_row = Adw.ComboRow(title="Hold to dictate", model=Gtk.StringList.new(labels))
+        self.hotkey_row.set_selected(
+            keys.index(self.settings.macos_hotkey) if self.settings.macos_hotkey in keys else 0
+        )
+        self.hotkey_row.connect("notify::selected", self._hotkey_changed)
+        group.add(self.hotkey_row)
+        return group
+
+    def _hotkey_changed(self, row: Adw.ComboRow, _param: object) -> None:
+        self.settings.macos_hotkey = MAC_HOTKEYS[row.get_selected()][1]
+        self._save_settings()
 
     def _switch_row(self, title: str, subtitle: str, attribute: str) -> Adw.SwitchRow:
         row = Adw.SwitchRow(title=title, subtitle=subtitle)
@@ -338,7 +391,7 @@ class TuxFlowWindow(Adw.ApplicationWindow):
                 "Audio and transcripts are processed on this computer. TuxFlow has no "
                 "account system, telemetry, subscription, or paid API integration. The "
                 "selected Whisper model is downloaded once from Hugging Face.\n\n"
-                "Transcription history is stored in your XDG data directory. Temporary "
+                "Transcription history is stored in your home directory. Temporary "
                 "microphone recordings are deleted after transcription by default."
             ),
             xalign=0,

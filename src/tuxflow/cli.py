@@ -10,16 +10,17 @@ from pathlib import Path
 
 from tuxflow.config import ConfigStore
 from tuxflow.daemon import run_daemon
-from tuxflow.doctor import run_checks
+from tuxflow.doctor import platform_summary, run_checks
 from tuxflow.engine import EngineUnavailableError, WhisperEngine
 from tuxflow.ipc import send_command
 from tuxflow.paths import models_dir
+from tuxflow.system import is_macos
 from tuxflow.text import process_text
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="tuxflow", description="Private, local Whisper dictation for Linux"
+        prog="tuxflow", description="Private, local Whisper dictation for Linux and macOS"
     )
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("app", help="Open the desktop app")
@@ -37,9 +38,14 @@ def _open_app() -> int:
     try:
         from tuxflow.app import run_app
     except (ImportError, ValueError) as error:
+        install = (
+            "brew install pygobject3 gtk4 libadwaita adwaita-icon-theme"
+            if is_macos()
+            else "install python3-gobject, gtk4, and libadwaita with your package manager"
+        )
         print(
-            "The GTK desktop dependencies are missing. "
-            "Install python3-gobject, gtk4, and libadwaita.\n"
+            f"The GTK desktop dependencies are missing. Run: {install}\n"
+            "Every other command, including `tuxflow toggle`, works without them.\n"
             f"Detail: {error}",
             file=sys.stderr,
         )
@@ -80,6 +86,7 @@ def _transcribe(path: Path, raw: bool) -> int:
 
 def _doctor() -> int:
     checks = run_checks()
+    print(platform_summary())
     for check in checks:
         icon = "✓" if check.ok else ("!" if not check.required else "✗")
         print(f"{icon} {check.name}: {check.detail}")

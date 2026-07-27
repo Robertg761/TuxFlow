@@ -1,4 +1,9 @@
-"""XDG paths used by TuxFlow."""
+"""XDG-style paths used by TuxFlow.
+
+macOS has no XDG specification, but the same layout is used there so that one
+set of paths, one backup story, and one uninstall command cover both platforms.
+The ``XDG_*`` environment variables are honoured wherever they are set.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +11,15 @@ import os
 from pathlib import Path
 
 
+def _environment_path(env_name: str) -> Path | None:
+    # An exported-but-empty variable is treated as unset; Path("") would
+    # silently resolve to the current working directory.
+    value = os.environ.get(env_name, "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def _xdg(env_name: str, fallback: str) -> Path:
-    return Path(os.environ.get(env_name, Path.home() / fallback)).expanduser()
+    return _environment_path(env_name) or (Path.home() / fallback)
 
 
 def config_dir() -> Path:
@@ -23,8 +35,8 @@ def cache_dir() -> Path:
 
 
 def runtime_dir() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR")
-    return Path(base) / "tuxflow" if base else cache_dir() / "runtime"
+    base = _environment_path("XDG_RUNTIME_DIR")
+    return base / "tuxflow" if base else cache_dir() / "runtime"
 
 
 def config_file() -> Path:

@@ -1,13 +1,26 @@
-"""Microphone recording through PipeWire's command-line client."""
+"""Microphone recording through whichever command-line recorder the machine has.
+
+Every backend writes the same thing — 16 kHz mono signed 16-bit WAV, which is
+what Whisper wants — and every backend is stopped with a signal it handles by
+finalising the WAV header. That keeps :class:`CommandRecorder` identical across
+PipeWire, ALSA, AVFoundation, and sox.
+"""
 
 from __future__ import annotations
 
+import os
 import shutil
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from tuxflow.system import LINUX, MACOS, current_os
+
+SAMPLE_RATE = "16000"
+CHANNELS = "1"
 
 
 class RecordingError(RuntimeError):
@@ -20,8 +33,156 @@ class Recording:
     duration_seconds: float
 
 
-class PipeWireRecorder:
-    def __init__(self) -> None:
+@dataclass(frozen=True, slots=True)
+class RecorderBackend:
+    """A command-line recorder TuxFlow knows how to drive."""
+
+    name: str
+    executable: str
+    install_hint: str
+    arguments: Callable[[Path, str], list[str]]
+    # sox picks its input device from the environment rather than from a flag.
+    device_env_var: str | None = None
+    # Tried when the default device is rejected and the user pinned no device.
+    fallback_device: str = ""
+    stop_signal: int = field(default=signal.SIGINT)
+
+    def is_available(self) -> bool:
+        return shutil.which(self.executable) is not None
+
+
+def _pipewire_arguments(path: Path, device: str) -> list[str]:
+    target = ["--target", device] if device else []
+    return [
+        "--format",
+        "s16",
+        "--rate",
+        SAMPLE_RATE,
+        "--channels",
+        CHANNELS,
+        *target,
+        str(path),
+    ]
+
+
+def _alsa_arguments(path: Path, device: str) -> list[str]:
+    target = ["-D", device] if device else []
+    return [
+        "-q",
+        "-f",
+        "S16_LE",
+        "-r",
+        SAMPLE_RATE,
+        "-c",
+        CHANNELS,
+        *target,
+        str(path),
+    ]
+
+
+def _ffmpeg_arguments(input_format: str, default_device: str) -> Callable[[Path, str], list[str]]:
+    def build(path: Path, device: str) -> list[str]:
+        return [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            input_format,
+            "-i",
+            device or default_device,
+            "-ac",
+            CHANNELS,
+            "-ar",
+            SAMPLE_RATE,
+            "-sample_fmt",
+            "s16",
+            "-y",
+            str(path),
+        ]
+
+    return build
+
+
+def _sox_arguments(path: Path, _device: str) -> list[str]:
+    return [
+        "-q",
+        "-d",
+        "-c",
+        CHANNELS,
+        "-r",
+        SAMPLE_RATE,
+        "-b",
+        "16",
+        "-e",
+        "signed-integer",
+        str(path),
+    ]
+
+
+PIPEWIRE = RecorderBackend(
+    name="PipeWire",
+    executable="pw-record",
+    install_hint="Install pipewire-utils (Fedora) or pipewire-bin (Debian/Ubuntu)",
+    arguments=_pipewire_arguments,
+)
+ALSA = RecorderBackend(
+    name="ALSA",
+    executable="arecord",
+    install_hint="Install alsa-utils",
+    arguments=_alsa_arguments,
+)
+FFMPEG_PULSE = RecorderBackend(
+    name="FFmpeg (PulseAudio)",
+    executable="ffmpeg",
+    install_hint="Install ffmpeg",
+    arguments=_ffmpeg_arguments("pulse", "default"),
+)
+FFMPEG_AVFOUNDATION = RecorderBackend(
+    name="FFmpeg (AVFoundation)",
+    executable="ffmpeg",
+    install_hint="Run: brew install ffmpeg",
+    arguments=_ffmpeg_arguments("avfoundation", ":default"),
+    # Older FFmpeg builds only accept the numeric AVFoundation device index.
+    fallback_device=":0",
+)
+SOX = RecorderBackend(
+    name="SoX",
+    executable="sox",
+    install_hint="Run: brew install sox",
+    arguments=_sox_arguments,
+    device_env_var="AUDIODEV",
+)
+
+BACKENDS: dict[str, tuple[RecorderBackend, ...]] = {
+    LINUX: (PIPEWIRE, ALSA, FFMPEG_PULSE),
+    MACOS: (FFMPEG_AVFOUNDATION, SOX),
+}
+
+
+def supported_backends() -> tuple[RecorderBackend, ...]:
+    """Return the recorders TuxFlow can use here, in order of preference."""
+    return BACKENDS.get(current_os(), ())
+
+
+def select_backend() -> RecorderBackend | None:
+    """Return the preferred recorder that is actually installed."""
+    return next((backend for backend in supported_backends() if backend.is_available()), None)
+
+
+def missing_recorder_message() -> str:
+    candidates = supported_backends()
+    if not candidates:
+        return "TuxFlow has no microphone backend for this operating system"
+    hints = " or ".join(f"{backend.executable} ({backend.install_hint})" for backend in candidates)
+    return f"No microphone recorder was found. Install {hints}."
+
+
+class CommandRecorder:
+    """Record the microphone by supervising an external recorder process."""
+
+    def __init__(self, backend: RecorderBackend | None = None, *, device: str = "") -> None:
+        self.backend = backend
+        self.device = device
         self._process: subprocess.Popen[bytes] | None = None
         self._path: Path | None = None
         self._started_at: float | None = None
@@ -30,48 +191,68 @@ class PipeWireRecorder:
     def is_recording(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
+    def _resolve_backend(self) -> RecorderBackend:
+        backend = self.backend or select_backend()
+        if backend is None:
+            raise RecordingError(missing_recorder_message())
+        executable = shutil.which(backend.executable)
+        if not executable:
+            raise RecordingError(f"{backend.executable} is missing. {backend.install_hint}")
+        self.backend = backend
+        return backend
+
+    def _environment(self, backend: RecorderBackend) -> dict[str, str] | None:
+        if backend.device_env_var and self.device:
+            return {**os.environ, backend.device_env_var: self.device}
+        return None
+
     def start(self, path: Path) -> None:
         if self.is_recording:
             raise RecordingError("A recording is already in progress")
-        executable = shutil.which("pw-record")
-        if not executable:
-            raise RecordingError("pw-record is missing; install PipeWire utilities")
+        backend = self._resolve_backend()
         path.parent.mkdir(parents=True, exist_ok=True)
+        devices = [self.device]
+        if not self.device and backend.fallback_device:
+            devices.append(backend.fallback_device)
+        failure = ""
+        for device in devices:
+            failure = self._spawn(backend, path, device)
+            if not failure:
+                return
+        raise RecordingError(failure)
+
+    def _spawn(self, backend: RecorderBackend, path: Path, device: str) -> str:
+        """Start the recorder once. Return an error message, or "" on success."""
+        executable = shutil.which(backend.executable) or backend.executable
         self._path = path
         self._started_at = time.monotonic()
         try:
             self._process = subprocess.Popen(
-                [
-                    executable,
-                    "--format",
-                    "s16",
-                    "--rate",
-                    "16000",
-                    "--channels",
-                    "1",
-                    str(path),
-                ],
+                [executable, *backend.arguments(path, device)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
+                env=self._environment(backend),
             )
         except OSError as error:
             self._reset()
-            raise RecordingError(f"Could not start PipeWire recording: {error}") from error
+            return f"Could not start {backend.name} recording: {error}"
         time.sleep(0.08)
         if self._process.poll() is not None:
             stderr = (self._process.stderr.read() if self._process.stderr else b"").decode(
                 errors="replace"
             )
             self._reset()
-            raise RecordingError(stderr.strip() or "PipeWire recording exited immediately")
+            return stderr.strip() or f"{backend.name} recording exited immediately"
+        return ""
 
     def stop(self) -> Recording:
         if not self.is_recording or not self._process or not self._path:
             raise RecordingError("No recording is in progress")
         process = self._process
         path = self._path
+        stop_signal = self.backend.stop_signal if self.backend else signal.SIGINT
         started_at = self._started_at or time.monotonic()
-        process.send_signal(signal.SIGINT)
+        process.send_signal(stop_signal)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -100,3 +281,13 @@ class PipeWireRecorder:
         self._process = None
         self._path = None
         self._started_at = None
+
+
+def create_recorder(device: str = "") -> CommandRecorder:
+    """Return a recorder for this machine, resolving the backend lazily.
+
+    Resolution is deferred to the first recording so the daemon still starts on a
+    machine that is missing the recorder, and so the resulting error can be shown
+    in the UI instead of crashing at import time.
+    """
+    return CommandRecorder(device=device)

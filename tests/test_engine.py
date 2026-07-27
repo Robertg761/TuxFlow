@@ -8,7 +8,9 @@ def test_engine_wraps_model_load_failure(monkeypatch, tmp_path):
         def __init__(self, *_args, **_kwargs):
             raise RuntimeError("boom")
 
-    import faster_whisper
+    faster_whisper = pytest.importorskip(
+        "faster_whisper", reason="the speech engine extra is not installed"
+    )
 
     monkeypatch.setattr(faster_whisper, "WhisperModel", BrokenModel)
     engine = WhisperEngine(

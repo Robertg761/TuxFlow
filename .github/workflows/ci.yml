@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both supported platforms, at the oldest and newest Python TuxFlow claims.
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install TuxFlow
+        # The speech extra is skipped: it pulls in CTranslate2 and model weights,
+        # and the engine test skips itself when faster-whisper is absent.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Import the daemon without a desktop
+        # Guards the rule that platform-only bindings stay lazily imported.
+        run: python -c "import tuxflow.daemon, tuxflow.doctor, tuxflow.cli"
+
+      - name: Doctor
+        # No microphone or session on a runner, so this only has to run cleanly.
+        run: tuxflow doctor || true
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check syntax
+        run: for script in scripts/*.sh; do bash -n "$script"; done
+
+      - name: ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck --severity=warning scripts/*.sh

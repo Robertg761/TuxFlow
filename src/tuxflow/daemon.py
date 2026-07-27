@@ -10,14 +10,19 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from tuxflow.audio import PipeWireRecorder, RecordingError
+from tuxflow.audio import RecordingError, create_recorder
 from tuxflow.config import ConfigStore, Settings
 from tuxflow.engine import EngineUnavailableError, WhisperEngine
 from tuxflow.history import HistoryStore
 from tuxflow.insertion import insert_text, prepare_input_backend, shutdown_input_backend
 from tuxflow.notify import notify
 from tuxflow.paths import ensure_directories, models_dir, recordings_dir, socket_file
-from tuxflow.portal import GlobalShortcutsPortal, PortalUnavailableError
+from tuxflow.shortcuts import (
+    MANUAL_FALLBACK,
+    ShortcutUnavailableError,
+    create_shortcut_backend,
+)
+from tuxflow.system import os_label
 from tuxflow.text import process_text
 from tuxflow.tray import TrayIndicator
 
@@ -26,11 +31,13 @@ class TuxFlowDaemon:
     def __init__(self) -> None:
         ensure_directories()
         self.config_store = ConfigStore()
+        settings = self.config_store.load()
         self.history = HistoryStore()
-        self.recorder = PipeWireRecorder()
-        self.portal = GlobalShortcutsPortal(
+        self.recorder = create_recorder(settings.audio_device)
+        self.shortcuts = create_shortcut_backend(
             self._on_shortcut_pressed,
             self._on_shortcut_released,
+            hotkey=settings.macos_hotkey,
         )
         self.tray = TrayIndicator()
         self.server: asyncio.AbstractServer | None = None
@@ -40,7 +47,7 @@ class TuxFlowDaemon:
         self._engine: WhisperEngine | None = None
         self._engine_key: tuple[str, str, str] | None = None
         self._operation_lock = asyncio.Lock()
-        self._portal_task: asyncio.Task[None] | None = None
+        self._shortcut_task: asyncio.Task[None] | None = None
         self._transcription_task: asyncio.Task[None] | None = None
 
     def status(self) -> dict[str, Any]:
@@ -50,6 +57,7 @@ class TuxFlowDaemon:
             "recording": self.recorder.is_recording,
             "shortcut": self.shortcut,
             "last_error": self.last_error,
+            "platform": os_label(),
             "pid": os.getpid(),
         }
 
@@ -60,29 +68,30 @@ class TuxFlowDaemon:
         path.chmod(0o600)
         await self.tray.start()
         await asyncio.to_thread(prepare_input_backend)
-        self._portal_task = asyncio.create_task(self._setup_portal())
+        self._shortcut_task = asyncio.create_task(self._setup_shortcut())
         async with self.server:
             await self.server.serve_forever()
 
-    async def _setup_portal(self) -> None:
-        if os.environ.get("TUXFLOW_DISABLE_PORTAL") == "1":
-            self.shortcut = "Global shortcut portal disabled; use `tuxflow toggle`"
+    async def _setup_shortcut(self) -> None:
+        disabled = {"TUXFLOW_DISABLE_SHORTCUT", "TUXFLOW_DISABLE_PORTAL"}
+        if any(os.environ.get(name) == "1" for name in disabled):
+            self.shortcut = f"Global shortcut disabled; {MANUAL_FALLBACK.lower()}"
             return
         try:
-            self.shortcut = await self.portal.connect()
-        except (PortalUnavailableError, TimeoutError) as error:
+            self.shortcut = await self.shortcuts.connect()
+        except (ShortcutUnavailableError, TimeoutError) as error:
             self.last_error = str(error)
-            self.shortcut = "Use `tuxflow toggle` or configure a desktop shortcut"
+            self.shortcut = MANUAL_FALLBACK
             self.tray.update("error", self.last_error)
             notify("TuxFlow shortcut needs attention", self.last_error, urgency="normal")
 
     async def shutdown(self) -> None:
         self.recorder.cancel()
         shutdown_input_backend()
-        for task in (self._portal_task, self._transcription_task):
+        for task in (self._shortcut_task, self._transcription_task):
             if task and not task.done():
                 task.cancel()
-        self.portal.close()
+        self.shortcuts.close()
         self.tray.close()
         if self.server:
             self.server.close()
@@ -148,6 +157,9 @@ class TuxFlowDaemon:
             if self.state != "idle":
                 return
             self.last_error = ""
+            # Re-read the microphone choice so a settings change applies to the
+            # next dictation instead of waiting for a service restart.
+            self.recorder.device = self.config_store.load().audio_device
             path = recordings_dir() / f"{uuid.uuid4().hex}.wav"
             try:
                 await asyncio.to_thread(self.recorder.start, path)

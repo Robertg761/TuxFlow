@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+# The desktop portal is Linux-only, and so is dbus-next.
+pytest.importorskip("dbus_next", reason="the global shortcuts portal needs dbus-next")
+
 from dbus_next.errors import DBusError
 
 import tuxflow.portal as portal_module

@@ -1,5 +1,7 @@
+import pytest
+
 from tuxflow import APP_ID
-from tuxflow.tray import _StatusNotifierItem, presentation_for_state
+from tuxflow.tray import presentation_for_state
 
 
 def test_tray_presentations_cover_daemon_states():
@@ -21,6 +23,10 @@ def test_tray_presentations_cover_daemon_states():
 
 
 def test_status_notifier_item_updates_properties():
+    # The tray itself is Linux-only; the presentation logic above is not.
+    pytest.importorskip("dbus_next", reason="the system tray needs dbus-next")
+    from tuxflow.tray_sni import _StatusNotifierItem
+
     item = _StatusNotifierItem()
 
     assert item.Title == "TuxFlow — Ready"

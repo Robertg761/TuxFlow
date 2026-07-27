@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.tuxflow.TuxFlow</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@TUXFLOW_BIN@</string>
+    <string>daemon</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <!-- launchd starts agents with a minimal PATH, so Homebrew's ffmpeg and sox
+       would be invisible to the recorder without this. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@TUXFLOW_PATH@</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>@TUXFLOW_LOG@</string>
+  <key>StandardErrorPath</key>
+  <string>@TUXFLOW_LOG@</string>
+</dict>
+</plist>

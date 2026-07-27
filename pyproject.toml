@@ -5,23 +5,34 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tuxflow"
 version = "0.1.0"
-description = "Private, local-first voice dictation for Linux powered by Whisper"
+description = "Private, local-first voice dictation for Linux and macOS powered by Whisper"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "TuxFlow contributors" }]
-keywords = ["linux", "dictation", "whisper", "speech-to-text", "wayland"]
+keywords = ["linux", "macos", "dictation", "whisper", "speech-to-text", "wayland"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: X11 Applications :: GTK",
+  "Environment :: MacOS X",
   "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS :: MacOS X",
   "Programming Language :: Python :: 3",
 ]
-dependencies = ["dbus-next>=0.2.3"]
+# Each platform pulls only the bindings it can actually use: D-Bus for the
+# Linux desktop portal and tray, PyObjC for the macOS event tap.
+dependencies = [
+  "dbus-next>=0.2.3; sys_platform == 'linux'",
+  "pyobjc-framework-Quartz>=9.2; sys_platform == 'darwin'",
+]
 
 [project.optional-dependencies]
 speech = ["faster-whisper>=1.2.1"]
 dev = ["pytest>=8", "ruff>=0.12"]
+
+[project.urls]
+Homepage = "https://github.com/Robertg761/TuxFlow"
+Issues = "https://github.com/Robertg761/TuxFlow/issues"
 
 [project.scripts]
 tuxflow = "tuxflow.cli:main"
@@ -41,3 +52,6 @@ ignore = ["BLE001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests import tuxflow straight from the source tree, so `pytest` works in a
+# fresh clone without installing the package first.
+pythonpath = ["src"]

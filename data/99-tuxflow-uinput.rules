@@ -1,0 +1,3 @@
+# Let members of the "input" group open /dev/uinput so ydotool can type the
+# paste shortcut on Wayland. Installed by ./scripts/install.sh --with-uinput.
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

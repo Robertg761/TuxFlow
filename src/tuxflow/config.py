@@ -30,6 +30,11 @@ class Settings:
     language: str = "auto"
     device: str = "cpu"
     compute_type: str = "int8"
+    # Empty means "whatever the recorder treats as the default microphone".
+    audio_device: str = ""
+    # Which modifier to hold on macOS; ignored on Linux, where the desktop
+    # portal owns the binding. See tuxflow.mac_hotkey.HOTKEYS.
+    macos_hotkey: str = "fn"
     auto_paste: bool = True
     remove_fillers: bool = True
     spoken_punctuation: bool = True

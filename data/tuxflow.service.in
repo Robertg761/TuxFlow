@@ -5,7 +5,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/tuxflow daemon
+ExecStart=@TUXFLOW_BIN@ daemon
 Restart=on-failure
 RestartSec=2
 

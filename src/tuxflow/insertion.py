@@ -1,4 +1,9 @@
-"""Clipboard and simulated paste support across Wayland and X11."""
+"""Clipboard and simulated paste for Wayland, X11, and macOS.
+
+The public surface is platform neutral — :func:`insert_text` copies the
+transcript and, when asked, presses the paste shortcut of the host platform.
+Everything below it is split into ``_linux_*`` and ``_macos_*`` helpers.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +15,18 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from tuxflow.system import is_linux, is_macos
+
 _ydotool_daemon: subprocess.Popen[bytes] | None = None
 _ydotool_owned_socket: Path | None = None
 YDOTOOL_DEVICE_SETTLE_SECONDS = 0.75
+
+# macOS keystrokes go through System Events rather than a CGEventTap because
+# osascript reports a real failure when Accessibility access has not been
+# granted. Posting CGEvents from an untrusted process silently does nothing,
+# which would make TuxFlow claim it pasted when it did not.
+_MACOS_PASTE_SCRIPT = 'tell application "System Events" to keystroke "v" using command down'
+_MACOS_RETURN_SCRIPT = 'tell application "System Events" to key code 36'
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +52,12 @@ def _run(command: list[str], *, input_text: str | None = None) -> bool:
         return False
 
 
-def copy_text(text: str) -> bool:
+# --------------------------------------------------------------------------- #
+# Linux
+# --------------------------------------------------------------------------- #
+
+
+def _linux_copy_text(text: str) -> bool:
     session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
     if session_type == "wayland" and shutil.which("wl-copy"):
         return _run(["wl-copy", "--type", "text/plain;charset=utf-8"], input_text=text)
@@ -122,9 +141,124 @@ def _ensure_ydotool() -> bool:
     return False
 
 
+def _linux_paste_clipboard() -> bool:
+    time.sleep(0.08)
+    # Linux input event codes: LEFTCTRL=29 and V=47.
+    if _ensure_ydotool() and _run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"]):
+        return True
+    if shutil.which("wtype") and _run(["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"]):
+        return True
+    if os.environ.get("DISPLAY") and shutil.which("xdotool"):
+        return _run(["xdotool", "key", "--clearmodifiers", "ctrl+v"])
+    return False
+
+
+def _linux_press_enter() -> bool:
+    if _ensure_ydotool() and _run(["ydotool", "key", "28:1", "28:0"]):
+        return True
+    if shutil.which("wtype") and _run(["wtype", "-k", "Return"]):
+        return True
+    if os.environ.get("DISPLAY") and shutil.which("xdotool"):
+        return _run(["xdotool", "key", "Return"])
+    return False
+
+
+# --------------------------------------------------------------------------- #
+# macOS
+# --------------------------------------------------------------------------- #
+
+
+def _macos_copy_text(text: str) -> bool:
+    if not shutil.which("pbcopy"):
+        return False
+    return _run(["pbcopy"], input_text=text)
+
+
+def _macos_run_script(script: str) -> bool:
+    if not shutil.which("osascript"):
+        return False
+    return _run(["osascript", "-e", script])
+
+
+def _macos_paste_clipboard() -> bool:
+    time.sleep(0.08)
+    return _macos_run_script(_MACOS_PASTE_SCRIPT)
+
+
+def _macos_press_enter() -> bool:
+    return _macos_run_script(_MACOS_RETURN_SCRIPT)
+
+
+def macos_accessibility_trusted() -> bool | None:
+    """Whether macOS trusts this process to send keystrokes.
+
+    Returns ``None`` when the answer cannot be determined, which is the case
+    whenever PyObjC is not installed.
+    """
+    try:
+        from ApplicationServices import AXIsProcessTrusted  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        return bool(AXIsProcessTrusted())
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Platform-neutral entry points
+# --------------------------------------------------------------------------- #
+
+
+def copy_text(text: str) -> bool:
+    if is_macos():
+        return _macos_copy_text(text)
+    if is_linux():
+        return _linux_copy_text(text)
+    return False
+
+
+def paste_clipboard() -> bool:
+    if is_macos():
+        return _macos_paste_clipboard()
+    if is_linux():
+        return _linux_paste_clipboard()
+    return False
+
+
+def press_enter() -> bool:
+    if is_macos():
+        return _macos_press_enter()
+    if is_linux():
+        return _linux_press_enter()
+    return False
+
+
+def clipboard_tool() -> str | None:
+    """Name of the clipboard helper TuxFlow would use, for diagnostics."""
+    candidates = ("pbcopy",) if is_macos() else ("wl-copy", "xclip", "xsel")
+    return next((tool for tool in candidates if shutil.which(tool)), None)
+
+
+def can_paste_automatically() -> bool:
+    if is_macos():
+        return shutil.which("osascript") is not None and macos_accessibility_trusted() is not False
+    if is_linux():
+        session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        return (
+            ydotool_can_start()
+            or shutil.which("wtype") is not None
+            or (session == "x11" and shutil.which("xdotool") is not None)
+        )
+    return False
+
+
 def prepare_input_backend() -> bool:
     """Start the virtual keyboard early so it is ready before the first dictation."""
-    return _ensure_ydotool()
+    if is_linux():
+        return _ensure_ydotool()
+    # macOS needs no helper process; permission is requested on first keystroke.
+    return is_macos()
 
 
 def shutdown_input_backend() -> None:
@@ -139,28 +273,6 @@ def shutdown_input_backend() -> None:
         _ydotool_owned_socket.unlink(missing_ok=True)
     _ydotool_daemon = None
     _ydotool_owned_socket = None
-
-
-def paste_clipboard() -> bool:
-    time.sleep(0.08)
-    # Linux input event codes: LEFTCTRL=29 and V=47.
-    if _ensure_ydotool() and _run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"]):
-        return True
-    if shutil.which("wtype") and _run(["wtype", "-M", "ctrl", "-k", "v", "-m", "ctrl"]):
-        return True
-    if os.environ.get("DISPLAY") and shutil.which("xdotool"):
-        return _run(["xdotool", "key", "--clearmodifiers", "ctrl+v"])
-    return False
-
-
-def press_enter() -> bool:
-    if _ensure_ydotool() and _run(["ydotool", "key", "28:1", "28:0"]):
-        return True
-    if shutil.which("wtype") and _run(["wtype", "-k", "Return"]):
-        return True
-    if os.environ.get("DISPLAY") and shutil.which("xdotool"):
-        return _run(["xdotool", "key", "Return"])
-    return False
 
 
 def insert_text(text: str, *, auto_paste: bool, send_enter: bool = False) -> InsertResult:

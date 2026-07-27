@@ -14,6 +14,7 @@ from dbus_next.errors import DBusError
 from dbus_next.introspection import Node
 
 from tuxflow import APP_ID
+from tuxflow.shortcuts import SHORTCUT_ID, ShortcutUnavailableError
 
 PORTAL_SERVICE = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
@@ -61,7 +62,7 @@ PORTAL_INTROSPECTION = Node.parse(
 )
 
 
-class PortalUnavailableError(RuntimeError):
+class PortalUnavailableError(ShortcutUnavailableError):
     pass
 
 
@@ -161,7 +162,7 @@ class GlobalShortcutsPortal:
             bind_token = "tuxflow_bind_" + uuid.uuid4().hex
             shortcuts = [
                 [
-                    "toggle-dictation",
+                    SHORTCUT_ID,
                     {
                         "description": Variant("s", "Hold to dictate; release to transcribe"),
                         "preferred_trigger": Variant("s", PREFERRED_TRIGGER),
@@ -211,7 +212,7 @@ class GlobalShortcutsPortal:
     def _activated(
         self, session_handle: str, shortcut_id: str, _timestamp: int, _options: dict
     ) -> None:
-        if session_handle == self.session_handle and shortcut_id == "toggle-dictation":
+        if session_handle == self.session_handle and shortcut_id == SHORTCUT_ID:
             asyncio.create_task(self.press_callback(shortcut_id))
 
     def _deactivated(
@@ -220,7 +221,7 @@ class GlobalShortcutsPortal:
         if (
             self.release_callback
             and session_handle == self.session_handle
-            and shortcut_id == "toggle-dictation"
+            and shortcut_id == SHORTCUT_ID
         ):
             asyncio.create_task(self.release_callback(shortcut_id))
 

@@ -28,7 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 speech = ["faster-whisper>=1.2.1"]
-dev = ["pytest>=8", "ruff>=0.12", "shellcheck-py>=0.10"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.12", "shellcheck-py>=0.10"]
 
 [project.urls]
 Homepage = "https://github.com/Robertg761/TuxFlow"

@@ -39,15 +39,33 @@ jobs:
           python -m ruff format --check .
 
       - name: Test
-        run: python -m pytest -q
+        # Coverage is reported, not enforced: a number in the log is useful when
+        # reviewing a change, but a threshold would only invite tests written to
+        # move it.
+        run: python -m pytest -q --cov=tuxflow --cov-report=term-missing
 
       - name: Import the daemon without a desktop
         # Guards the rule that platform-only bindings stay lazily imported.
         run: python -c "import tuxflow.daemon, tuxflow.doctor, tuxflow.cli"
 
       - name: Doctor
-        # No microphone or session on a runner, so this only has to run cleanly.
-        run: tuxflow doctor || true
+        # No microphone or session on a runner, so a required check failing --
+        # exit 1 -- is the expected result. Any other exit code, or a traceback
+        # on the way there, means doctor itself is broken.
+        run: |
+          set +e
+          output="$(tuxflow doctor 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+            echo "::error::tuxflow doctor exited $status (expected 0 or 1)"
+            exit 1
+          fi
+          if echo "$output" | grep -q "Traceback"; then
+            echo "::error::tuxflow doctor crashed with a traceback"
+            exit 1
+          fi
 
   scripts:
     name: Shell scripts

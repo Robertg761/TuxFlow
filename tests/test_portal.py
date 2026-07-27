@@ -7,6 +7,8 @@ import pytest
 # The desktop portal is Linux-only, and so is dbus-next.
 pytest.importorskip("dbus_next", reason="the global shortcuts portal needs dbus-next")
 
+from dbus_next import Variant
+from dbus_next.constants import MessageType
 from dbus_next.errors import DBusError
 
 import tuxflow.portal as portal_module
@@ -214,3 +216,100 @@ def test_empty_binding_response_is_not_reported_as_configured(monkeypatch):
         assert "no key binding" in str(error)
     else:
         raise AssertionError("empty bindings must fail portal setup")
+
+
+class FakeSignal:
+    """A D-Bus Response signal as dbus-next hands it to the message handler."""
+
+    def __init__(self, path: str, body: list, member: str = "Response") -> None:
+        self.message_type = MessageType.SIGNAL
+        self.interface = "org.freedesktop.portal.Request"
+        self.member = member
+        self.path = path
+        self.body = body
+
+
+def _portal() -> GlobalShortcutsPortal:
+    async def callback(_shortcut_id: str) -> None:
+        pass
+
+    return GlobalShortcutsPortal(callback)
+
+
+def test_an_answer_that_arrives_while_waiting_wakes_the_waiter():
+    portal = _portal()
+    path = "/org/freedesktop/portal/desktop/request/test/bind"
+
+    async def scenario() -> dict:
+        waiting = asyncio.create_task(portal._wait_response(path))
+        await asyncio.sleep(0)
+        portal._message_handler(
+            FakeSignal(
+                path,
+                [
+                    0,
+                    {
+                        "shortcuts": Variant(
+                            "a(sa{sv})",
+                            [["toggle-dictation", {"trigger_description": Variant("s", "Ctrl+D")}]],
+                        )
+                    },
+                ],
+            )
+        )
+        return await waiting
+
+    results = asyncio.run(scenario())
+
+    # Every layer of D-Bus variant is unwrapped before TuxFlow sees it.
+    assert results == {"shortcuts": [["toggle-dictation", {"trigger_description": "Ctrl+D"}]]}
+    assert portal._waiters == {}
+
+
+def test_signals_from_other_interfaces_are_left_alone():
+    portal = _portal()
+
+    assert portal._message_handler(FakeSignal("/other", [0, {}], member="Closed")) is False
+    assert portal._responses == {}
+
+
+def test_a_shortcut_the_user_refuses_is_reported_in_plain_words():
+    portal = _portal()
+    portal._responses["/request/cancelled"] = (1, {})
+
+    with pytest.raises(PortalUnavailableError, match="cancelled"):
+        asyncio.run(portal._wait_response("/request/cancelled"))
+
+
+def test_a_portal_that_rejects_the_request_is_reported_too():
+    portal = _portal()
+    portal._responses["/request/failed"] = (2, {})
+
+    with pytest.raises(PortalUnavailableError, match="failed"):
+        asyncio.run(portal._wait_response("/request/failed"))
+
+
+def test_a_dialog_nobody_answers_gives_up_instead_of_hanging(monkeypatch):
+    monkeypatch.setattr(portal_module, "PORTAL_RESPONSE_TIMEOUT_SECONDS", 0.05)
+    portal = _portal()
+
+    with pytest.raises(PortalUnavailableError, match="Timed out"):
+        asyncio.run(portal._wait_response("/request/ignored"))
+
+    # A waiter left in the map would leak for the life of the daemon.
+    assert portal._waiters == {}
+
+
+def test_closing_the_portal_drops_the_bus():
+    portal = _portal()
+    closed: list[bool] = []
+
+    class FakeBus:
+        def disconnect(self):
+            closed.append(True)
+
+    portal.bus = FakeBus()
+    portal.close()
+
+    assert closed == [True]
+    assert portal.bus is None

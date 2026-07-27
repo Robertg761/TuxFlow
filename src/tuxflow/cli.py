@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+from tuxflow import __version__
 from tuxflow.config import ConfigStore
 from tuxflow.daemon import run_daemon
 from tuxflow.doctor import platform_summary, run_checks
@@ -22,6 +23,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tuxflow", description="Private, local Whisper dictation for Linux and macOS"
     )
+    parser.add_argument("--version", action="version", version=f"tuxflow {__version__}")
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("app", help="Open the desktop app")
     subcommands.add_parser("daemon", help="Run the background service")

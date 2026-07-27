@@ -8,6 +8,7 @@ import shutil
 import socket
 from dataclasses import dataclass
 
+from tuxflow import __version__
 from tuxflow.audio import missing_recorder_message, select_backend
 from tuxflow.insertion import (
     clipboard_tool,
@@ -179,4 +180,6 @@ def _macos_checks() -> list[Check]:
 
 
 def platform_summary() -> str:
-    return f"TuxFlow on {os_label()}"
+    # The version belongs here: this is the command README sends people to,
+    # and its output is what ends up pasted into a bug report.
+    return f"TuxFlow {__version__} on {os_label()}"

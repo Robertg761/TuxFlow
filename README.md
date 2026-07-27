@@ -36,7 +36,37 @@ original Whisper code and model weights under the MIT license.
 
 ## Install
 
-One command on either platform, from a clone of this repository:
+### Linux: the AppImage
+
+Download `TuxFlow-*-x86_64.AppImage` from the
+[latest release](https://github.com/Robertg761/TuxFlow/releases), make it
+executable, and run it:
+
+```bash
+chmod +x TuxFlow-*-x86_64.AppImage
+./TuxFlow-*-x86_64.AppImage doctor
+./TuxFlow-*-x86_64.AppImage          # opens the control center
+```
+
+It carries its own Python, GTK 4, libadwaita, and faster-whisper, so nothing has
+to be installed first. It needs glibc 2.39 or newer — Ubuntu 24.04+, Fedora 40+,
+Debian 13+.
+
+Three things stay on the host on purpose, because they talk to daemons the
+bundle cannot reach from inside: a recorder (`pw-record`, `arecord`, or
+`ffmpeg`), a clipboard tool (`wl-clipboard` or `xclip`), and `ydotool`/`wtype`
+for automatic paste. All three are already present on most desktop installs, and
+`doctor` names any that are missing. Automatic paste on Wayland also needs
+`/dev/uinput` access, which only the installer below can set up; without it
+TuxFlow copies the transcript and you press Ctrl+V.
+
+The AppImage does not start at login on its own. Run `./TuxFlow-*.AppImage
+daemon` from your session's autostart, or use the installer for a managed
+service.
+
+### Either platform: install from source
+
+One command, from a clone of this repository:
 
 ```bash
 ./scripts/install.sh

@@ -87,14 +87,61 @@ mkdir -p "$APPDIR" "$TOOLS"
 # AppImage tooling
 # --------------------------------------------------------------------------- #
 
-log "Fetching linuxdeploy and appimagetool"
-base="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous"
-gtk_base="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master"
-appimage_base="https://github.com/AppImage/appimagetool/releases/download/continuous"
+# These three run as root and walk the whole bundle, so none of them is fetched
+# from a mutable ref. Each is pinned to an immutable tag or commit and checked
+# against a digest recorded here before it is ever made executable.
+#
+# REFRESHING THE PINS
+#   1. Pick the new tag, or commit for the GTK plugin, from upstream:
+#        https://github.com/linuxdeploy/linuxdeploy/releases
+#        https://github.com/AppImage/appimagetool/releases
+#        https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/commits/master
+#   2. Update the matching _VERSION or _COMMIT value below.
+#   3. Download each asset yourself, run `sha256sum` on the downloaded file,
+#      and paste the digest into the matching _SHA256 value. Never copy a
+#      digest from anywhere but a file you fetched and inspected.
+#   4. Rebuild. A stale digest fails the build here rather than shipping.
+LINUXDEPLOY_VERSION="1-alpha-20251107-1"
+LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
+APPIMAGETOOL_VERSION="1.9.1"
+APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+# The GTK plugin has no tagged releases at all, so it is pinned by commit.
+GTK_PLUGIN_COMMIT="7a3fbc31a9e5075073ff8790f26effbac5f84453"
+GTK_PLUGIN_SHA256="b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171"
 
-wget -q -O "$TOOLS/linuxdeploy" "$base/linuxdeploy-$ARCH.AppImage"
-wget -q -O "$TOOLS/linuxdeploy-plugin-gtk" "$gtk_base/linuxdeploy-plugin-gtk.sh"
-wget -q -O "$TOOLS/appimagetool" "$appimage_base/appimagetool-$ARCH.AppImage"
+fetch_verified() {
+  local url="$1" dest="$2" expected="$3" actual
+
+  wget -q -O "$dest" "$url"
+  actual="$(sha256sum <"$dest" | cut -d' ' -f1)"
+  if [[ "$actual" != "$expected" ]]; then
+    {
+      echo
+      echo "FATAL: checksum mismatch on build tooling."
+      echo "  url:      $url"
+      echo "  expected: $expected"
+      echo "  actual:   $actual"
+      echo
+      echo "Refusing to execute an unverified binary. If upstream legitimately"
+      echo "republished this asset, follow the REFRESHING THE PINS note in"
+      echo "scripts/build-appimage.sh to re-pin it deliberately."
+    } >&2
+    exit 1
+  fi
+  log "verified $(basename "$dest") ($expected)"
+}
+
+log "Fetching linuxdeploy and appimagetool"
+base="https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_VERSION"
+gtk_base="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/$GTK_PLUGIN_COMMIT"
+appimage_base="https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION"
+
+fetch_verified "$base/linuxdeploy-$ARCH.AppImage" \
+  "$TOOLS/linuxdeploy" "$LINUXDEPLOY_SHA256"
+fetch_verified "$gtk_base/linuxdeploy-plugin-gtk.sh" \
+  "$TOOLS/linuxdeploy-plugin-gtk" "$GTK_PLUGIN_SHA256"
+fetch_verified "$appimage_base/appimagetool-$ARCH.AppImage" \
+  "$TOOLS/appimagetool" "$APPIMAGETOOL_SHA256"
 chmod +x "$TOOLS/linuxdeploy" "$TOOLS/linuxdeploy-plugin-gtk" "$TOOLS/appimagetool"
 
 # There is no FUSE inside a container or on a CI runner.

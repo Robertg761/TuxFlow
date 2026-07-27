@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 import gi
 
@@ -57,6 +58,93 @@ def _background(function: Callable[[], object], callback: Callable[[object], Non
         GLib.idle_add(callback, result)
 
     threading.Thread(target=work, daemon=True).start()
+
+
+# States during which the daemon owns the microphone or the CPU. Anything else is
+# treated as "not busy" so a state this build has never heard of (the daemon may
+# grow new ones) still leaves the window usable.
+BUSY_STATES = frozenset({"recording", "processing"})
+READY_STATES = frozenset({"idle", ""})
+GENERIC_ERROR = "TuxFlow's background service reported a problem."
+DAEMON_UNAVAILABLE = (
+    "TuxFlow's background service could not be started. Try running: tuxflow daemon"
+)
+
+
+def _probe_daemon(timeout: float = 0.4) -> bool:
+    """Return True when something is actually listening on the control socket.
+
+    The socket file outlives a crashed daemon — only a clean shutdown unlinks it —
+    so its mere existence says nothing about whether commands will be answered.
+    """
+    path = socket_file()
+    if not path.exists():
+        return False
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(timeout)
+    try:
+        client.connect(str(path))
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        client.close()
+
+
+def _ensure_daemon_running(*, wait: float = 6.0) -> bool:
+    """Start the daemon unless one already answers. Blocking; call off the UI thread."""
+    if _probe_daemon():
+        return True
+    # Nothing answered, so whatever is on disk is a leftover from a crash and would
+    # make asyncio.open_unix_connection fail forever. Clear it before respawning.
+    try:
+        socket_file().unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "tuxflow", "daemon"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    deadline = time.monotonic() + wait
+    while True:
+        if _probe_daemon():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def _history_signature(items: Sequence[object]) -> tuple[int, int]:
+    """Cheap identity for a history page: (row count, newest id)."""
+    newest = getattr(items[0], "id", -1) if items else -1
+    return len(items), int(newest)
+
+
+def _status_message(state: str, shortcut: str) -> tuple[str, str, bool, bool]:
+    """Map a daemon state to (status text, button label, button enabled, destructive)."""
+    if state == "recording":
+        return f"● Listening — {shortcut}", "Stop and transcribe", True, True
+    if state == "processing":
+        return "Transcribing locally…", "Working…", False, False
+    if state in READY_STATES:
+        return f"Ready — {shortcut}", "Start dictation", True, False
+    if state == "offline":
+        return "Background service is not running", "Start dictation", True, False
+    # Unknown or newly added state (for example "starting"): name it rather than
+    # claiming the service is ready.
+    return f"{state.replace('_', ' ').capitalize()} — {shortcut}", "Start dictation", True, False
+
+
+def _error_text(error: object) -> str:
+    """Never let an empty or whitespace-only error blank the UI."""
+    text = str(error).strip() if error is not None else ""
+    return text or GENERIC_ERROR
 
 
 class EditorDialog(Gtk.Window):
@@ -129,6 +217,10 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         self.config_store = ConfigStore()
         self.settings = self.config_store.load()
         self.history_store = HistoryStore()
+        self._last_state: str | None = None
+        self._history_signature: tuple[int, int] | None = None
+        self._history_pending = False
+        self._error_message = ""
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -161,7 +253,7 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         self.stack.add_titled(self._build_privacy(), "privacy", "Privacy")
 
         GLib.timeout_add_seconds(1, self._poll_status)
-        self._refresh_history()
+        self._refresh_history(force=True)
 
     @staticmethod
     def _page() -> Gtk.ScrolledWindow:
@@ -200,6 +292,7 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         hero.append(subtitle)
         self.status_label = Gtk.Label(label="Checking background service…", xalign=0)
         hero.append(self.status_label)
+        hero.append(self._build_error_banner())
         self.toggle_button = Gtk.Button(label="Start dictation")
         self.toggle_button.add_css_class("suggested-action")
         self.toggle_button.add_css_class("pill")
@@ -212,7 +305,7 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         history_title = Gtk.Label(label="Recent dictations", xalign=0, hexpand=True)
         history_title.add_css_class("title-2")
         refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh")
-        refresh.connect("clicked", lambda *_args: self._refresh_history())
+        refresh.connect("clicked", lambda *_args: self._refresh_history(force=True))
         history_header.append(history_title)
         history_header.append(refresh)
         box.append(history_header)
@@ -220,6 +313,37 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         self.history_list.add_css_class("boxed-list")
         box.append(self.history_list)
         return page
+
+    def _build_error_banner(self) -> Gtk.Widget:
+        # Adw.Banner needs libadwaita 1.3; fall back to a plain label elsewhere so
+        # the error is still visible on older runtimes.
+        if hasattr(Adw, "Banner"):
+            banner = Adw.Banner(revealed=False)
+            banner.set_button_label("Dismiss")
+            banner.connect("button-clicked", lambda *_args: self.show_error(""))
+        else:
+            banner = Gtk.Label(xalign=0, wrap=True)
+            banner.add_css_class("error")
+            banner.set_visible(False)
+        self.error_banner = banner
+        return banner
+
+    def show_error(self, message: str) -> None:
+        """Show a daemon error, or hide the banner when the message is empty."""
+        text = message.strip() if message else ""
+        if text == self._error_message:
+            return
+        self._error_message = text
+        banner = getattr(self, "error_banner", None)
+        if banner is None:
+            return
+        if isinstance(banner, Gtk.Label):
+            banner.set_text(text)
+            banner.set_visible(bool(text))
+            return
+        if text:
+            banner.set_title(text)
+        banner.set_revealed(bool(text))
 
     def _build_settings(self) -> Gtk.Widget:
         page = self._page()
@@ -503,8 +627,10 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         def finished(result: object) -> None:
             self.toggle_button.set_sensitive(True)
             if isinstance(result, Exception):
-                self.status_label.set_text(str(result))
-            elif isinstance(result, dict):
+                # Timeouts arrive as RuntimeError from ipc.send_command; anything
+                # else still gets a readable message rather than an empty banner.
+                self.show_error(_error_text(result))
+            elif isinstance(result, Mapping):
                 self._render_status(result)
 
         _background(execute, finished)
@@ -514,36 +640,62 @@ class TuxFlowWindow(Adw.ApplicationWindow):
             return asyncio.run(send_command("status"))
 
         def finished(result: object) -> None:
-            if isinstance(result, dict):
+            if isinstance(result, Mapping):
                 self._render_status(result)
+            elif isinstance(result, Exception):
+                self._render_status({"state": "offline", "last_error": _error_text(result)})
 
         _background(execute, finished)
         return GLib.SOURCE_CONTINUE
 
-    def _render_status(self, status: dict) -> None:
-        state = status.get("state", "offline")
-        shortcut = status.get("shortcut") or "Shortcut not configured"
-        if state == "recording":
-            self.status_label.set_text(f"● Listening — {shortcut}")
-            self.toggle_button.set_label("Stop and transcribe")
+    def _render_status(self, status: Mapping[str, object]) -> None:
+        state = str(status.get("state") or "offline")
+        shortcut = str(status.get("shortcut") or "") or "Shortcut not configured"
+        label, button_label, sensitive, destructive = _status_message(state, shortcut)
+        self.status_label.set_text(label)
+        self.toggle_button.set_label(button_label)
+        self.toggle_button.set_sensitive(sensitive)
+        if destructive:
             self.toggle_button.add_css_class("destructive-action")
-        elif state == "processing":
-            self.status_label.set_text("Transcribing locally…")
-            self.toggle_button.set_label("Working…")
-            self.toggle_button.set_sensitive(False)
         else:
-            self.status_label.set_text(f"Ready — {shortcut}")
-            self.toggle_button.set_label("Start dictation")
-            self.toggle_button.set_sensitive(True)
             self.toggle_button.remove_css_class("destructive-action")
+
+        # A missing key and an empty string both mean "no error"; only a non-empty
+        # last_error should raise the banner.
+        raw_error = status.get("last_error") or ""
+        self.show_error(str(raw_error).strip())
+
+        previous, self._last_state = self._last_state, state
+        # Only touch SQLite when a dictation could have finished, instead of on
+        # every one-second poll.
+        if previous != state and state not in BUSY_STATES:
             self._refresh_history()
 
-    def _refresh_history(self) -> None:
-        if not hasattr(self, "history_list"):
+    def _refresh_history(self, *, force: bool = False) -> None:
+        if not hasattr(self, "history_list") or self._history_pending:
             return
+        self._history_pending = True
+
+        def execute() -> object:
+            return self.history_store.recent(20)
+
+        def finished(result: object) -> None:
+            self._history_pending = False
+            if isinstance(result, Exception) or not isinstance(result, list):
+                return
+            signature = _history_signature(result)
+            # Rebuilding the list box resets scroll position and flickers, so skip
+            # it when nothing was added or removed.
+            if not force and signature == self._history_signature:
+                return
+            self._history_signature = signature
+            self._populate_history(result)
+
+        _background(execute, finished)
+
+    def _populate_history(self, items: Sequence[object]) -> None:
         while child := self.history_list.get_first_child():
             self.history_list.remove(child)
-        items = self.history_store.recent(20)
         for item in items:
             row = Adw.ActionRow(
                 title=item.text or "(voice command)",
@@ -572,7 +724,7 @@ class TuxFlowWindow(Adw.ApplicationWindow):
 
     def _clear_history(self, *_args: object) -> None:
         self.history_store.clear()
-        self._refresh_history()
+        self._refresh_history(force=True)
 
 
 class TuxFlowApplication(Adw.Application):
@@ -581,25 +733,23 @@ class TuxFlowApplication(Adw.Application):
         self.window: TuxFlowWindow | None = None
 
     def do_activate(self) -> None:
-        self._ensure_daemon()
         if self.window is None:
             self.window = TuxFlowWindow(self)
         self.window.present()
+        self._ensure_daemon()
 
-    @staticmethod
-    def _ensure_daemon() -> None:
-        if socket_file().exists():
-            return
-        try:
-            subprocess.Popen(
-                [sys.executable, "-m", "tuxflow", "daemon"],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            time.sleep(0.15)
-        except OSError:
-            pass
+    def _ensure_daemon(self) -> None:
+        # Probing, spawning and waiting all block, so they must not run on the GTK
+        # main loop; the window is already up and the status poll fills it in.
+        def finished(result: object) -> None:
+            if self.window is None:
+                return
+            if isinstance(result, Exception):
+                self.window.show_error(_error_text(result))
+            elif result is False:
+                self.window.show_error(DAEMON_UNAVAILABLE)
+
+        _background(_ensure_daemon_running, finished)
 
 
 def run_app() -> int:

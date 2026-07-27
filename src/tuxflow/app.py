@@ -604,4 +604,7 @@ class TuxFlowApplication(Adw.Application):
 
 def run_app() -> int:
     app = TuxFlowApplication()
-    return int(app.run(sys.argv))
+    # Only the program name. Everything after it has already been consumed by
+    # TuxFlow's own parser, and GApplication would read the leftover `app`
+    # subcommand as a file to open and refuse to start.
+    return int(app.run(sys.argv[:1]))

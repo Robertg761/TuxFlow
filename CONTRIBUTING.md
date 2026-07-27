@@ -66,8 +66,9 @@ framework: drive it through a stand-in object rather than skipping the test.
 Reserve `pytest.importorskip` for tests that genuinely need a platform-only
 dependency to be installed.
 
-CI runs `ruff` and `pytest` on both Ubuntu and macOS, so a change that only
-builds on one of them will fail there.
+`make lint` runs `ruff check`, `ruff format --check`, and ShellCheck over the
+install scripts — the same checks CI runs on both Ubuntu and macOS, so a change
+that only builds on one of them will fail there.
 
 ## Style
 

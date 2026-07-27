@@ -26,6 +26,11 @@ from tuxflow.system import os_label
 from tuxflow.text import process_text
 from tuxflow.tray import TrayIndicator
 
+# A held modifier can be missed — a key released while the screen was locked, a
+# tap macOS switched off, a stuck portal. Without a ceiling the daemon would
+# record until it was restarted and fill the disk with one WAV.
+MAX_RECORDING_SECONDS = 600.0
+
 
 class TuxFlowDaemon:
     def __init__(self) -> None:
@@ -49,6 +54,7 @@ class TuxFlowDaemon:
         self._operation_lock = asyncio.Lock()
         self._shortcut_task: asyncio.Task[None] | None = None
         self._transcription_task: asyncio.Task[None] | None = None
+        self._recording_watchdog: asyncio.Task[None] | None = None
 
     def status(self) -> dict[str, Any]:
         return {
@@ -88,7 +94,7 @@ class TuxFlowDaemon:
     async def shutdown(self) -> None:
         self.recorder.cancel()
         shutdown_input_backend()
-        for task in (self._shortcut_task, self._transcription_task):
+        for task in (self._shortcut_task, self._transcription_task, self._recording_watchdog):
             if task and not task.done():
                 task.cancel()
         self.shortcuts.close()
@@ -170,11 +176,32 @@ class TuxFlowDaemon:
                 return
             self.state = "recording"
             self.tray.update("recording")
+            self._recording_watchdog = asyncio.create_task(self._watch_recording_length())
+
+    async def _watch_recording_length(self) -> None:
+        await asyncio.sleep(MAX_RECORDING_SECONDS)
+        if self.state != "recording":
+            return
+        notify(
+            "Dictation stopped",
+            f"TuxFlow recorded for {int(MAX_RECORDING_SECONDS // 60)} minutes without a "
+            "release and is transcribing what it has.",
+        )
+        await self.stop_recording()
+
+    def _cancel_watchdog(self) -> None:
+        task = self._recording_watchdog
+        self._recording_watchdog = None
+        # The watchdog stops the recording itself, so it must not cancel itself
+        # part-way through doing so.
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
 
     async def stop_recording(self) -> None:
         async with self._operation_lock:
             if self.state != "recording":
                 return
+            self._cancel_watchdog()
             try:
                 recording = await asyncio.to_thread(self.recorder.stop)
             except RecordingError as error:
@@ -200,6 +227,7 @@ class TuxFlowDaemon:
     async def cancel_recording(self) -> None:
         async with self._operation_lock:
             if self.state == "recording":
+                self._cancel_watchdog()
                 await asyncio.to_thread(self.recorder.cancel)
                 self.state = "idle"
                 self.tray.update("idle")

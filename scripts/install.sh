@@ -193,8 +193,13 @@ install_linux_integration() {
   systemd_dir="$(config_home)/systemd/user"
   mkdir -p "$applications_dir" "$icons_dir" "$systemd_dir"
 
-  install -m 0644 "$PROJECT_DIR/data/$APP_ID.desktop" "$applications_dir/"
   install -m 0644 "$PROJECT_DIR/data/$APP_ID.svg" "$icons_dir/"
+  # Both files spell out the full path to the launcher: a desktop session does
+  # not always have ~/.local/bin on PATH, and a bare `tuxflow` would then start
+  # nothing at all when the entry is clicked.
+  sed "s|@TUXFLOW_BIN@|$TUXFLOW_BIN|g" "$PROJECT_DIR/data/$APP_ID.desktop.in" \
+    >"$applications_dir/$APP_ID.desktop"
+  chmod 0644 "$applications_dir/$APP_ID.desktop"
   sed "s|@TUXFLOW_BIN@|$TUXFLOW_BIN|g" "$PROJECT_DIR/data/tuxflow.service.in" \
     >"$systemd_dir/tuxflow.service"
 
@@ -308,11 +313,12 @@ fi
 # The service takes a moment to open its socket, and the report below would
 # otherwise say it is not running on a perfectly good install.
 wait_for_service() {
-  local socket attempt
+  local socket attempts
   socket="$("$VENV_DIR/bin/python" -c \
     'from tuxflow.paths import socket_file; print(socket_file())' 2>/dev/null)" || return 0
   [[ -n "$socket" ]] || return 0
-  for attempt in $(seq 1 20); do
+  attempts=20
+  while ((attempts-- > 0)); do
     if [[ -S "$socket" ]]; then
       return 0
     fi

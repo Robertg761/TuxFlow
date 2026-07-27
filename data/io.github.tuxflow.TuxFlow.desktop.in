@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=TuxFlow
 Comment=Private local voice dictation powered by Whisper
-Exec=tuxflow app
+Exec=@TUXFLOW_BIN@ app
 Icon=io.github.tuxflow.TuxFlow
 Terminal=false
 Type=Application

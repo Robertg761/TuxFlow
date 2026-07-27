@@ -21,6 +21,8 @@ test: $(PY)
 
 lint: $(PY)
 	$(PY) -m ruff check .
+	$(PY) -m ruff format --check .
+	$(VENV)/bin/shellcheck --severity=warning scripts/*.sh
 
 format: $(PY)
 	$(PY) -m ruff format .

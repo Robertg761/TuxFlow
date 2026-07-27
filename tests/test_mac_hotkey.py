@@ -160,6 +160,36 @@ def test_the_tap_is_re_enabled_after_macos_disables_it():
     assert (frameworks.tap, True) in frameworks.enable_calls
 
 
+def test_a_disabled_tap_does_not_leave_dictation_running_forever():
+    # The release arrives while the tap is off, so the listener never sees it.
+    # Without treating the outage as a release, this dictation never ends.
+    events: list[str] = []
+    fn = HOTKEYS["fn"]
+
+    async def pressed(_shortcut_id: str) -> None:
+        events.append("pressed")
+
+    async def released(_shortcut_id: str) -> None:
+        events.append("released")
+
+    frameworks = FakeFrameworks()
+    listener = MacHotkeyListener(pressed, released, hotkey="fn", frameworks=frameworks)
+
+    async def scenario() -> None:
+        await listener.connect()
+        frameworks.callback(None, FLAGS_CHANGED, _event(fn.keycode, fn.flag_mask), None)
+        await _drain()
+        frameworks.callback(None, TAP_DISABLED_BY_USER_INPUT, _event(0, 0), None)
+        await _drain()
+        # A later press still works, so recovery is not a one-way door.
+        frameworks.callback(None, FLAGS_CHANGED, _event(fn.keycode, fn.flag_mask), None)
+        await _drain()
+        listener.close()
+
+    asyncio.run(scenario())
+    assert events == ["pressed", "released", "pressed"]
+
+
 def test_denied_accessibility_permission_is_explained_not_swallowed():
     frameworks = FakeFrameworks(tap=None)
 

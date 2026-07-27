@@ -7,6 +7,7 @@ Everything below it is split into ``_linux_*`` and ``_macos_*`` helpers.
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import socket as socket_module
@@ -194,15 +195,24 @@ def macos_accessibility_trusted() -> bool | None:
 
     Returns ``None`` when the answer cannot be determined, which is the case
     whenever PyObjC is not installed.
+
+    ``AXIsProcessTrusted`` has moved between PyObjC modules over the years and
+    lives in a different one depending on which subpackages are installed, so
+    every known home is tried before giving up.
     """
-    try:
-        from ApplicationServices import AXIsProcessTrusted  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-    try:
-        return bool(AXIsProcessTrusted())
-    except Exception:
-        return None
+    for module_name in ("ApplicationServices", "HIServices", "Quartz"):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        is_trusted = getattr(module, "AXIsProcessTrusted", None)
+        if is_trusted is None:
+            continue
+        try:
+            return bool(is_trusted())
+        except Exception:
+            return None
+    return None
 
 
 # --------------------------------------------------------------------------- #

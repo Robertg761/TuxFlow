@@ -116,6 +116,9 @@ class MacHotkeyListener:
         self._ready = threading.Event()
         self._error = ""
         self._pressed = False
+        # asyncio only holds a weak reference to a running task, so without this
+        # a dictation could be collected mid-flight.
+        self._tasks: set[asyncio.Task[Any]] = set()
 
     async def connect(self) -> str:
         self._loop = asyncio.get_running_loop()
@@ -179,6 +182,10 @@ class MacHotkeyListener:
                 # back on is the documented recovery and keeps dictation working.
                 if self._tap is not None:
                     frameworks.CGEventTapEnable(self._tap, True)
+                # The release that happened while the tap was off never arrived,
+                # so treat the gap as one: otherwise a dictation started before
+                # the tap died would record until the daemon is restarted.
+                self._set_pressed(False)
             elif event_type == frameworks.kCGEventFlagsChanged:
                 keycode = int(
                     frameworks.CGEventGetIntegerValueField(
@@ -204,7 +211,9 @@ class MacHotkeyListener:
             return
 
         def schedule() -> None:
-            loop.create_task(callback(SHORTCUT_ID))
+            task = loop.create_task(callback(SHORTCUT_ID))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
         try:
             loop.call_soon_threadsafe(schedule)

@@ -12,15 +12,28 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 from tuxflow.system import LINUX, MACOS, current_os
 
 SAMPLE_RATE = "16000"
 CHANNELS = "1"
+
+
+def _last_line(text: str) -> str:
+    """Return the most useful line of a recorder's diagnostics.
+
+    FFmpeg in particular prints a banner of context before the sentence that
+    says what actually went wrong, and only the last line belongs in a
+    notification.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
 
 class RecordingError(RuntimeError):
@@ -186,6 +199,7 @@ class CommandRecorder:
         self._process: subprocess.Popen[bytes] | None = None
         self._path: Path | None = None
         self._started_at: float | None = None
+        self._stderr: IO[bytes] | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -226,11 +240,17 @@ class CommandRecorder:
         executable = shutil.which(backend.executable) or backend.executable
         self._path = path
         self._started_at = time.monotonic()
+        # A pipe would deadlock the recorder once its 64 KiB buffer filled, and
+        # nothing reads that buffer until the recording ends. A temporary file
+        # has no such limit and is discarded with the recorder.
+        # The handle deliberately outlives this call: it belongs to the
+        # recorder for as long as the recorder runs, and _reset() closes it.
+        self._stderr = tempfile.TemporaryFile()  # noqa: SIM115
         try:
             self._process = subprocess.Popen(
                 [executable, *backend.arguments(path, device)],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=self._stderr,
                 env=self._environment(backend),
             )
         except OSError as error:
@@ -238,30 +258,54 @@ class CommandRecorder:
             return f"Could not start {backend.name} recording: {error}"
         time.sleep(0.08)
         if self._process.poll() is not None:
-            stderr = (self._process.stderr.read() if self._process.stderr else b"").decode(
-                errors="replace"
-            )
+            stderr = self._read_stderr()
             self._reset()
-            return stderr.strip() or f"{backend.name} recording exited immediately"
+            return stderr or f"{backend.name} recording exited immediately"
         return ""
 
+    def _read_stderr(self) -> str:
+        if self._stderr is None:
+            return ""
+        try:
+            self._stderr.seek(0)
+            return _last_line(self._stderr.read().decode(errors="replace"))
+        except (OSError, ValueError):
+            return ""
+
     def stop(self) -> Recording:
-        if not self.is_recording or not self._process or not self._path:
+        if self._process is None or self._path is None:
             raise RecordingError("No recording is in progress")
         process = self._process
         path = self._path
-        stop_signal = self.backend.stop_signal if self.backend else signal.SIGINT
         started_at = self._started_at or time.monotonic()
-        process.send_signal(stop_signal)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            process.wait(timeout=2)
+        # The recorder may already have quit on its own: an unplugged
+        # microphone, a device another app grabbed, or a full disk. That is not
+        # the same as never having started, and it deserves the real reason.
+        died_on_its_own = process.poll() is not None
+        if not died_on_its_own:
+            stop_signal = self.backend.stop_signal if self.backend else signal.SIGINT
+            process.send_signal(stop_signal)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
         duration = max(0.0, time.monotonic() - started_at)
+        reason = self._read_stderr()
         self._reset()
+        if died_on_its_own:
+            path.unlink(missing_ok=True)
+            raise RecordingError(reason or "The microphone stopped recording unexpectedly")
         if not path.exists() or path.stat().st_size < 44:
-            raise RecordingError("The microphone recording was empty")
+            path.unlink(missing_ok=True)
+            # Here the headline is the useful part; the recorder's own last word
+            # is only ever a detail, so it does not get to replace it.
+            detail = f" ({reason})" if reason else ""
+            raise RecordingError(f"The microphone recording was empty{detail}")
         return Recording(path=path, duration_seconds=duration)
 
     def cancel(self) -> Path | None:
@@ -281,6 +325,12 @@ class CommandRecorder:
         self._process = None
         self._path = None
         self._started_at = None
+        if self._stderr is not None:
+            try:
+                self._stderr.close()
+            except OSError:
+                pass
+            self._stderr = None
 
 
 def create_recorder(device: str = "") -> CommandRecorder:

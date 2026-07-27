@@ -111,6 +111,28 @@ def test_unknown_state_is_named_rather_than_called_ready():
     assert (button, sensitive, destructive) == ("Start dictation", True, False)
 
 
+def test_an_available_update_offers_a_button_only_to_an_appimage():
+    title, button = app._update_message("0.2.0", appimage=True)
+    assert title == "TuxFlow 0.2.0 is available"
+    assert button == "Update"
+
+    title, button = app._update_message("0.2.0", appimage=False)
+    # A source install is told where to get it instead of being offered an
+    # in-place update it cannot perform.
+    assert title.startswith("TuxFlow 0.2.0 is available")
+    assert "release page" in title
+    assert button == "Release page"
+
+
+def test_update_progress_is_labelled_from_zero_to_a_hundred():
+    # A release with no Content-Length reports 0.0 forever, which has to read as
+    # "working", not as "0%".
+    assert app._progress_label(0.0) == "Updating…"
+    assert app._progress_label(0.5) == "Updating… 50%"
+    assert app._progress_label(1.0) == "Updating… 100%"
+    assert app._progress_label(1.5) == "Updating… 100%"
+
+
 def test_error_text_never_returns_an_empty_string():
     assert app._error_text(RuntimeError("timed out")) == "timed out"
     assert app._error_text(RuntimeError("")) == app.GENERIC_ERROR

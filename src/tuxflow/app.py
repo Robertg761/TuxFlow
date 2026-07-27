@@ -17,12 +17,13 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gio, GLib, Gtk
 
-from tuxflow import APP_ID
+from tuxflow import APP_ID, updater
 from tuxflow.config import ConfigStore, Replacement, Snippet
 from tuxflow.history import HistoryStore
 from tuxflow.ipc import send_command
 from tuxflow.paths import socket_file
 from tuxflow.system import is_macos, os_label
+from tuxflow.updater import Update
 
 MODELS = ["tiny", "base", "small", "medium", "large-v3", "turbo"]
 # Populated on macOS only; Linux shortcuts are owned by the desktop portal.
@@ -141,6 +142,30 @@ def _status_message(state: str, shortcut: str) -> tuple[str, str, bool, bool]:
     return f"{state.replace('_', ' ').capitalize()} — {shortcut}", "Start dictation", True, False
 
 
+UPDATE_INSTALLED = "Update installed. Restart TuxFlow to run version {version}."
+UPDATE_LINK_FAILED = "Could not open a browser. The release is at {url}"
+
+
+def _update_message(version: str, *, appimage: bool) -> tuple[str, str]:
+    """Map an available update to (banner text, button label).
+
+    Only an AppImage can replace itself. Everything else was put on disk by pip,
+    a distribution package, or scripts/install.sh, and is theirs to update — so
+    that banner points at the release page instead of offering a button that
+    would have to lie.
+    """
+    title = f"TuxFlow {version} is available"
+    if appimage:
+        return title, "Update"
+    return f"{title} — open the release page to install it", "Release page"
+
+
+def _progress_label(fraction: float) -> str:
+    if fraction <= 0:
+        return "Updating…"
+    return f"Updating… {int(min(fraction, 1.0) * 100)}%"
+
+
 def _error_text(error: object) -> str:
     """Never let an empty or whitespace-only error blank the UI."""
     text = str(error).strip() if error is not None else ""
@@ -221,6 +246,10 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         self._history_signature: tuple[int, int] | None = None
         self._history_pending = False
         self._error_message = ""
+        self._update: Update | None = None
+        self._update_installable = False
+        self._update_busy = False
+        self._update_checked = False
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -293,6 +322,7 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         self.status_label = Gtk.Label(label="Checking background service…", xalign=0)
         hero.append(self.status_label)
         hero.append(self._build_error_banner())
+        hero.append(self._build_update_banner())
         self.toggle_button = Gtk.Button(label="Start dictation")
         self.toggle_button.add_css_class("suggested-action")
         self.toggle_button.add_css_class("pill")
@@ -344,6 +374,117 @@ class TuxFlowWindow(Adw.ApplicationWindow):
         if text:
             banner.set_title(text)
         banner.set_revealed(bool(text))
+
+    # ----------------------------------------------------------------- #
+    # Updates
+    # ----------------------------------------------------------------- #
+
+    def _build_update_banner(self) -> Gtk.Widget:
+        # Same shape as the error banner: Adw.Banner needs libadwaita 1.3, and
+        # an older runtime still has to be able to show the message.
+        if hasattr(Adw, "Banner"):
+            banner = Adw.Banner(revealed=False)
+            banner.connect("button-clicked", lambda *_args: self._update_clicked())
+        else:
+            banner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            banner.set_visible(False)
+            banner.label = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+            banner.button = Gtk.Button()
+            banner.button.connect("clicked", lambda *_args: self._update_clicked())
+            banner.append(banner.label)
+            banner.append(banner.button)
+        self.update_banner = banner
+        return banner
+
+    def _set_update_banner(self, text: str, button_label: str | None) -> None:
+        banner = getattr(self, "update_banner", None)
+        if banner is None:
+            return
+        if isinstance(banner, Gtk.Box):
+            banner.label.set_text(text)
+            banner.button.set_label(button_label or "")
+            banner.button.set_visible(bool(button_label))
+            banner.set_visible(bool(text))
+            return
+        banner.set_title(text)
+        # An empty label is how Adw.Banner is told to show no button at all.
+        banner.set_button_label(button_label or "")
+        banner.set_revealed(bool(text))
+
+    def maybe_check_for_update(self) -> None:
+        """Ask GitHub about newer releases at most once a day, if allowed to."""
+        if not self.settings.check_updates or self._update_checked:
+            return
+        self._update_checked = True
+
+        def execute() -> object:
+            if not updater.check_is_due():
+                return None
+            # Stamped before the answer is known, and kept even when the
+            # request failed: a machine that cannot reach GitHub should not
+            # retry on every single launch.
+            updater.write_last_check()
+            return updater.check_for_update()
+
+        def finished(result: object) -> None:
+            # Anything else — None, or an exception _background caught — means
+            # there is nothing to tell the user about.
+            if isinstance(result, Update):
+                self.show_update(result)
+
+        _background(execute, finished)
+
+    def show_update(self, update: Update) -> None:
+        self._update = update
+        self._update_installable = (
+            update.has_appimage and updater.running_appimage_path() is not None
+        )
+        self._set_update_banner(*_update_message(update.version, appimage=self._update_installable))
+
+    def _update_clicked(self) -> None:
+        update = self._update
+        if update is None or self._update_busy:
+            return
+        if not self._update_installable:
+            self._open_release_page(update)
+            return
+        self._update_busy = True
+        title = f"TuxFlow {update.version} is available"
+        self._set_update_banner(title, _progress_label(0.0))
+
+        def execute() -> object:
+            def report(fraction: float, _message: str) -> None:
+                GLib.idle_add(self._update_progress, fraction)
+
+            return updater.download_and_install(update, progress=report)
+
+        def finished(result: object) -> None:
+            self._update_busy = False
+            if isinstance(result, Exception):
+                # Every failure path leaves the installed AppImage untouched,
+                # so the banner goes back to offering the update.
+                self.show_error(_error_text(result))
+                self._set_update_banner(title, "Update")
+                return
+            self._set_update_banner(UPDATE_INSTALLED.format(version=update.version), None)
+
+        _background(execute, finished)
+
+    def _update_progress(self, fraction: float) -> bool:
+        if self._update_busy and self._update is not None:
+            self._set_update_banner(
+                f"TuxFlow {self._update.version} is available", _progress_label(fraction)
+            )
+        return GLib.SOURCE_REMOVE
+
+    def _open_release_page(self, update: Update) -> None:
+        try:
+            opened = Gio.AppInfo.launch_default_for_uri(update.release_url, None)
+        except GLib.Error:
+            opened = False
+        if not opened:
+            # No browser, or no portal to ask: the URL itself is still useful.
+            self.show_error(UPDATE_LINK_FAILED.format(url=update.release_url))
 
     def _build_settings(self) -> Gtk.Widget:
         page = self._page()
@@ -413,6 +554,17 @@ class TuxFlowWindow(Adw.ApplicationWindow):
             )
         )
         box.append(behavior)
+
+        updates = Adw.PreferencesGroup(title="Updates")
+        updates.add(
+            self._switch_row(
+                "Check for updates",
+                "One anonymous request a day to the GitHub releases API. Nothing "
+                "about you or this computer is sent.",
+                "check_updates",
+            )
+        )
+        box.append(updates)
         return page
 
     def _build_microphone_row(self) -> Adw.EntryRow:
@@ -737,6 +889,9 @@ class TuxFlowApplication(Adw.Application):
             self.window = TuxFlowWindow(self)
         self.window.present()
         self._ensure_daemon()
+        # After present(), so the window is already on screen while the request
+        # is in flight; the banner appears underneath it when there is news.
+        self.window.maybe_check_for_update()
 
     def _ensure_daemon(self) -> None:
         # Probing, spawning and waiting all block, so they must not run on the GTK

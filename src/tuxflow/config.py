@@ -41,6 +41,8 @@ class Settings:
     press_enter_command: bool = False
     keep_audio: bool = False
     launch_at_login: bool = True
+    # One anonymous request a day to the GitHub releases API, and nothing else.
+    check_updates: bool = True
     dictionary: list[Replacement] = field(default_factory=list)
     snippets: list[Snippet] = field(default_factory=list)
 

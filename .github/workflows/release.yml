@@ -63,6 +63,7 @@ jobs:
           name: appimage
           path: |
             dist/*.AppImage
+            dist/*.AppImage.zsync
             dist/SHA256SUMS
 
       - name: Attach to the release
@@ -80,5 +81,8 @@ jobs:
               --title "$GITHUB_REF_NAME" \
               --generate-notes
           fi
+          # The .zsync file goes up with the rest: the AppImage advertises it as
+          # its update source, and AppImageUpdate looks for it by name among the
+          # latest release's assets.
           gh release upload "$GITHUB_REF_NAME" \
-            dist/*.AppImage dist/SHA256SUMS --clobber
+            dist/*.AppImage dist/*.AppImage.zsync dist/SHA256SUMS --clobber

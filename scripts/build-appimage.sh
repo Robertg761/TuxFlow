@@ -294,8 +294,31 @@ version="$("/usr/bin/python$PYTHON_VERSION" -c \
   "import re,pathlib;print(re.search(r'version = \"([^\"]+)\"',pathlib.Path('$PROJECT_DIR/pyproject.toml').read_text()).group(1))")"
 output="$PROJECT_DIR/dist/TuxFlow-$version-$ARCH.AppImage"
 
-ARCH="$ARCH" "$TOOLS/appimagetool" "$APPDIR" "$output"
+# Update information, embedded in the AppImage itself. TuxFlow's own updater
+# does not need it — it reads the GitHub API and verifies SHA256SUMS — but it is
+# what lets AppImageUpdate, appimageupdatetool, and the "update" entry in
+# AppImage-aware launchers work on this file. The glob is matched against the
+# assets of the latest *published, non-draft* release, so it has to keep
+# agreeing with the file name built above and with what release.yml uploads.
+UPDATE_INFORMATION="gh-releases-zsync|Robertg761|TuxFlow|latest|TuxFlow-*$ARCH.AppImage.zsync"
+
+ARCH="$ARCH" "$TOOLS/appimagetool" -u "$UPDATE_INFORMATION" "$APPDIR" "$output"
 chmod +x "$output"
 
+# With -u, appimagetool also writes the zsync control file. Which directory it
+# lands in has moved between releases, so accept it next to the output or in the
+# working directory, and fail loudly if it is missing: a published AppImage that
+# advertises update information with no matching .zsync asset sends every
+# AppImageUpdate client into an error.
+zsync="$output.zsync"
+if [[ ! -e "$zsync" && -e "$PWD/$(basename "$output").zsync" ]]; then
+  mv "$PWD/$(basename "$output").zsync" "$zsync"
+fi
+if [[ ! -e "$zsync" ]]; then
+  echo "FATAL: appimagetool did not produce $(basename "$zsync")." >&2
+  echo "Is zsync installed in the build environment?" >&2
+  exit 1
+fi
+
 log "Built $output"
-ls -lh "$output"
+ls -lh "$output" "$zsync"

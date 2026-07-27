@@ -55,6 +55,13 @@ def recordings_dir() -> Path:
     return cache_dir() / "recordings"
 
 
+def update_state_file() -> Path:
+    # Only "when did we last ask GitHub". It lives in the cache because losing
+    # it costs one extra HTTP request, and it stays out of config.json so a
+    # timestamp is not rewritten into the file users edit and back up.
+    return cache_dir() / "update-check.json"
+
+
 def models_dir() -> Path:
     return data_dir() / "models"
 

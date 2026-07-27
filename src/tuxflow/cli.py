@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from tuxflow import __version__
+from tuxflow import __version__, updater
 from tuxflow.config import ConfigStore
 from tuxflow.daemon import run_daemon
 from tuxflow.doctor import platform_summary, run_checks
@@ -33,6 +33,9 @@ def _parser() -> argparse.ArgumentParser:
     transcribe.add_argument("audio", type=Path)
     transcribe.add_argument("--raw", action="store_true", help="Skip TuxFlow text cleanup")
     subcommands.add_parser("doctor", help="Check system integration")
+    subcommands.add_parser(
+        "update", help="Check GitHub for a newer release, and install it on an AppImage"
+    )
     return parser
 
 
@@ -98,6 +101,58 @@ def _doctor() -> int:
     return 0 if all(check.ok or not check.required for check in checks) else 1
 
 
+def _print_progress(fraction: float, message: str) -> None:
+    # One line that rewrites itself, so a long download does not scroll away
+    # the version numbers printed above it.
+    percent = f" {int(fraction * 100):3d}%" if fraction > 0 else ""
+    print(f"\r{message}…{percent}   ", end="", flush=True)
+
+
+def _update() -> int:
+    current = updater.current_version()
+    print(f"Installed: {current}")
+    try:
+        payload = updater.latest_release(strict=True)
+    except updater.UpdateError as error:
+        print(error, file=sys.stderr)
+        return 1
+    if payload is None:
+        # 404: nothing has been published. A repository whose only release is
+        # still a draft looks exactly like this from outside, which is the
+        # expected answer right up until the first release goes public.
+        print(f"No release has been published yet. See {updater.RELEASES_PAGE_URL}")
+        return 0
+    latest = updater.normalise_version(str(payload.get("tag_name") or payload.get("name") or ""))
+    print(f"Latest:    {latest or 'unknown'}")
+
+    update = updater.update_from_release(payload, current=current)
+    updater.write_last_check()
+    if update is None:
+        print("TuxFlow is up to date.")
+        return 0
+
+    if updater.running_appimage_path() is None:
+        # A source install is owned by whatever installed it; rewriting files
+        # underneath pip or a distribution package would be a hostile act.
+        print(
+            f"TuxFlow {update.version} is available: {update.release_url}\n"
+            "This copy was not started from an AppImage, so update it the way it "
+            "was installed — re-run ./scripts/install.sh from an updated clone."
+        )
+        return 0
+
+    try:
+        installed = updater.download_and_install(update, progress=_print_progress)
+    except updater.UpdateError as error:
+        print(file=sys.stderr)  # close the progress line
+        print(error, file=sys.stderr)
+        return 1
+    print()  # close the progress line
+    print(f"Installed TuxFlow {update.version} into {installed}.")
+    print("Restart TuxFlow to run the new version.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     command = args.command or "app"
@@ -115,4 +170,6 @@ def main(argv: list[str] | None = None) -> int:
         return _transcribe(args.audio, args.raw)
     if command == "doctor":
         return _doctor()
+    if command == "update":
+        return _update()
     return 2

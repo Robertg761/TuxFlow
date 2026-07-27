@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -135,6 +136,108 @@ def test_doctor_fails_when_something_required_is_missing(monkeypatch, capsys):
 
     assert cli.main(["doctor"]) == 1
     assert "✗ Clipboard" in capsys.readouterr().out
+
+
+def _stub_update_check(monkeypatch, tag: str, *, appimage: Path | None = None):
+    """Answer `tuxflow update` from a canned release instead of the network."""
+    monkeypatch.setattr(
+        cli.updater,
+        "latest_release",
+        lambda **_options: {
+            "tag_name": tag,
+            "html_url": "https://github.com/Robertg761/TuxFlow/releases/tag/" + tag,
+            "assets": [
+                {
+                    "name": "TuxFlow-9.9.9-x86_64.AppImage",
+                    "browser_download_url": "https://example.test/TuxFlow.AppImage",
+                },
+                {"name": "SHA256SUMS", "browser_download_url": "https://example.test/SHA256SUMS"},
+            ],
+        },
+    )
+    monkeypatch.setattr(cli.updater, "current_version", lambda: "0.1.0a1")
+    monkeypatch.setattr(cli.updater, "running_appimage_path", lambda: appimage)
+
+
+def test_update_says_so_when_nothing_newer_has_been_released(temporary_home, monkeypatch, capsys):
+    _stub_update_check(monkeypatch, "v0.1.0a1")
+
+    assert cli.main(["update"]) == 0
+    printed = capsys.readouterr().out
+    assert "0.1.0a1" in printed
+    assert "up to date" in printed
+
+
+def test_update_reports_a_check_that_could_not_reach_github(temporary_home, monkeypatch, capsys):
+    def unreachable(**_options):
+        raise cli.updater.UpdateError("Could not reach api.github.com: no route to host")
+
+    monkeypatch.setattr(cli.updater, "latest_release", unreachable)
+
+    assert cli.main(["update"]) == 1
+    assert "Could not reach" in capsys.readouterr().err
+
+
+def test_update_is_not_a_failure_before_the_first_release_is_published(
+    temporary_home, monkeypatch, capsys
+):
+    # /releases/latest answers 404 while every release is still a draft.
+    monkeypatch.setattr(cli.updater, "latest_release", lambda **_options: None)
+
+    assert cli.main(["update"]) == 0
+    assert "No release has been published yet" in capsys.readouterr().out
+
+
+def test_update_on_a_source_install_points_at_the_release_page(temporary_home, monkeypatch, capsys):
+    _stub_update_check(monkeypatch, "v0.2.0", appimage=None)
+    monkeypatch.setattr(
+        cli.updater,
+        "download_and_install",
+        lambda *a, **k: pytest.fail("a source install must never be overwritten"),
+    )
+
+    assert cli.main(["update"]) == 0
+    printed = capsys.readouterr().out
+    assert "0.2.0" in printed
+    assert "releases/tag/v0.2.0" in printed
+    assert "install.sh" in printed
+
+
+def test_update_installs_a_newer_appimage_and_asks_for_a_restart(
+    temporary_home, monkeypatch, capsys
+):
+    bundle = temporary_home / "TuxFlow.AppImage"
+    bundle.write_bytes(b"ELF")
+    _stub_update_check(monkeypatch, "v0.2.0", appimage=bundle)
+    installed: list[str] = []
+
+    def fake_install(update, *, progress=None, **_options):
+        installed.append(update.version)
+        if progress is not None:
+            progress(0.5, "Downloading TuxFlow")
+        return bundle
+
+    monkeypatch.setattr(cli.updater, "download_and_install", fake_install)
+
+    assert cli.main(["update"]) == 0
+    assert installed == ["0.2.0"]
+    printed = capsys.readouterr().out
+    assert "Downloading TuxFlow" in printed
+    assert "Restart TuxFlow" in printed
+
+
+def test_a_failed_install_exits_one_with_a_readable_message(temporary_home, monkeypatch, capsys):
+    bundle = temporary_home / "TuxFlow.AppImage"
+    bundle.write_bytes(b"ELF")
+    _stub_update_check(monkeypatch, "v0.2.0", appimage=bundle)
+
+    def refuse(*_args, **_options):
+        raise cli.updater.UpdateError("The downloaded AppImage does not match the checksum.")
+
+    monkeypatch.setattr(cli.updater, "download_and_install", refuse)
+
+    assert cli.main(["update"]) == 1
+    assert "does not match the checksum" in capsys.readouterr().err
 
 
 def test_the_daemon_command_ends_quietly_on_ctrl_c(monkeypatch):

@@ -24,6 +24,17 @@ def test_round_trip(tmp_path):
     assert json.loads(path.read_text())["model"] == "base"
 
 
+def test_the_update_check_can_be_turned_off_and_stays_off(tmp_path):
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+    assert Settings().check_updates is True
+
+    store.save(Settings(check_updates=False))
+
+    assert json.loads(path.read_text())["check_updates"] is False
+    assert store.load().check_updates is False
+
+
 def test_invalid_config_uses_defaults(tmp_path):
     path = tmp_path / "config.json"
     path.write_text("{broken", encoding="utf-8")

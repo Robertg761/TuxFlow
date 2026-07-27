@@ -150,15 +150,44 @@ tuxflow cancel                 # discard the current recording
 tuxflow status                 # inspect service state
 tuxflow transcribe audio.wav   # transcribe an existing file
 tuxflow doctor                 # check this machine's integration
+tuxflow update                 # check for, and on an AppImage install, a new release
 ```
 
 You can bind `tuxflow toggle` to a mouse button or a desktop shortcut if the
 built-in hotkey is unavailable.
 
+## Updates
+
+Once a day, at most, TuxFlow asks GitHub whether a newer release exists. When
+there is one, a banner appears in the control center.
+
+- **AppImage** — the banner has an **Update** button, and `tuxflow update` does
+  the same thing from a terminal. TuxFlow downloads the new AppImage, compares
+  its SHA-256 against the `SHA256SUMS` file published with the release, and only
+  then replaces itself with an atomic rename. If the checksum file is missing,
+  or the digest does not match, nothing is installed and the old version keeps
+  running. Restart TuxFlow afterwards to pick the new version up. The AppImage
+  also carries standard update information, so `AppImageUpdate` and similar
+  tools work on it.
+- **Installed from source** — the banner links to the release page instead.
+  Nothing is ever written over an installation that pip, your distribution, or
+  `scripts/install.sh` owns; pull the repository and re-run `./scripts/install.sh`.
+- **Turning it off** — Settings › Updates › *Check for updates*.
+
+What the check sends: one anonymous HTTPS GET to
+`https://api.github.com/repos/Robertg761/TuxFlow/releases/latest`, carrying
+nothing but a user agent naming TuxFlow and its version. There is no account, no
+identifier, and no upload of any kind — not your settings, not your history, not
+a word of what you dictated. Only the timestamp of the last check is stored, in
+`~/.cache/tuxflow/update-check.json`, so the request is not repeated on every
+launch. Draft and prerelease builds are never offered.
+
 ## Privacy and storage
 
 TuxFlow has no telemetry or account system. After the selected model has been
-downloaded, normal dictation requires no network connection.
+downloaded, dictation requires no network connection: the only request TuxFlow
+makes on its own is the daily update check described above, which can be turned
+off.
 
 | Data | Default location | Default behavior |
 | --- | --- | --- |

@@ -58,9 +58,12 @@ class FakeRecorder:
 
 
 @pytest.fixture
-def daemon(tmp_path, monkeypatch):
-    for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"):
+def daemon(tmp_path, short_sock_dir, monkeypatch):
+    for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(variable, str(tmp_path / variable.lower()))
+    # The runtime dir holds the control socket, so it must stay short (see
+    # short_sock_dir).
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_sock_dir))
     monkeypatch.setenv("TUXFLOW_DISABLE_SHORTCUT", "1")
 
     notifications: list[tuple[str, str]] = []

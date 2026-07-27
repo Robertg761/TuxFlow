@@ -15,8 +15,8 @@ from tuxflow import ipc
 
 
 @pytest.fixture
-def socket_path(tmp_path, monkeypatch):
-    path = tmp_path / "tuxflow.sock"
+def socket_path(short_sock_dir, monkeypatch):
+    path = short_sock_dir / "tuxflow.sock"
     monkeypatch.setattr(ipc, "socket_file", lambda: path)
     return path
 

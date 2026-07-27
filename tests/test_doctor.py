@@ -108,8 +108,8 @@ def test_a_mac_without_pbcopy_gets_a_mac_answer(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_a_listening_service_is_found_at_its_socket(tmp_path, monkeypatch):
-    path = tmp_path / "tuxflow.sock"
+def test_a_listening_service_is_found_at_its_socket(short_sock_dir, monkeypatch):
+    path = short_sock_dir / "tuxflow.sock"
     monkeypatch.setattr(doctor, "socket_file", lambda: path)
     server = socket_module.socket(socket_module.AF_UNIX)
     server.bind(str(path))

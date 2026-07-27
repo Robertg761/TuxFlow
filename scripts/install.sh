@@ -264,7 +264,7 @@ install_macos_integration() {
   <key>CFBundleName</key><string>TuxFlow</string>
   <key>CFBundleDisplayName</key><string>TuxFlow</string>
   <key>CFBundleIdentifier</key><string>$APP_ID</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>TuxFlow</string>
   <key>NSMicrophoneUsageDescription</key>

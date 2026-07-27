@@ -12,15 +12,18 @@ _FILLERS = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Each command matches at the start of the utterance or after whitespace, so it also
+# fires when it is the very first word.  The leading group keeps the match anchored to a
+# word start, which stops "renewed paragraph" from turning into a paragraph break.
 _PUNCTUATION = (
-    (re.compile(r"\s+\bnew paragraph\b\s*", re.IGNORECASE), "\n\n"),
-    (re.compile(r"\s+\bnew line\b\s*", re.IGNORECASE), "\n"),
-    (re.compile(r"\s+\bquestion mark\b", re.IGNORECASE), "?"),
-    (re.compile(r"\s+\bexclamation (?:mark|point)\b", re.IGNORECASE), "!"),
-    (re.compile(r"\s+\bcomma\b", re.IGNORECASE), ","),
-    (re.compile(r"\s+\bcolon\b", re.IGNORECASE), ":"),
-    (re.compile(r"\s+\bsemicolon\b", re.IGNORECASE), ";"),
-    (re.compile(r"\s+\bperiod\b", re.IGNORECASE), "."),
+    (re.compile(r"(?:^|\s+)\bnew paragraph\b\s*", re.IGNORECASE), "\n\n"),
+    (re.compile(r"(?:^|\s+)\bnew line\b\s*", re.IGNORECASE), "\n"),
+    (re.compile(r"(?:^|\s+)\bquestion mark\b", re.IGNORECASE), "?"),
+    (re.compile(r"(?:^|\s+)\bexclamation (?:mark|point)\b", re.IGNORECASE), "!"),
+    (re.compile(r"(?:^|\s+)\bcomma\b", re.IGNORECASE), ","),
+    (re.compile(r"(?:^|\s+)\bcolon\b", re.IGNORECASE), ":"),
+    (re.compile(r"(?:^|\s+)\bsemicolon\b", re.IGNORECASE), ";"),
+    (re.compile(r"(?:^|\s+)\bperiod\b", re.IGNORECASE), "."),
 )
 
 _PRESS_ENTER = re.compile(r"(?:[\s,.!?]+)?press enter[.!?]?\s*$", re.IGNORECASE)
@@ -35,6 +38,21 @@ class ProcessedText:
 def _phrase_pattern(phrase: str) -> re.Pattern[str]:
     escaped = re.escape(phrase.strip())
     return re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE)
+
+
+def _tidy_spacing(text: str) -> str:
+    text = re.sub(r"[ \t]+([,.;:!?])", r"\1", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def _capitalize_sentences(text: str) -> str:
+    if not text:
+        return text
+    return re.sub(
+        r"(^|[.!?]\s+|\n+)([a-z])",
+        lambda match: match.group(1) + match.group(2).upper(),
+        text,
+    )
 
 
 def process_text(raw_text: str, settings: Settings) -> ProcessedText:
@@ -52,6 +70,12 @@ def process_text(raw_text: str, settings: Settings) -> ProcessedText:
         for pattern, replacement in _PUNCTUATION:
             text = pattern.sub(replacement, text)
 
+    # Capitalize the dictated words *before* substitution: replacement text carries its
+    # own deliberate casing ("iPhone", "macOS") and must survive untouched even when it
+    # lands at the start of a sentence.  Matching stays case-insensitive, so capitalizing
+    # the spoken form first does not stop it from being found.
+    text = _capitalize_sentences(_tidy_spacing(text))
+
     for item in sorted(settings.snippets, key=lambda value: len(value.trigger), reverse=True):
         if item.trigger.strip():
             text = _phrase_pattern(item.trigger).sub(
@@ -64,12 +88,4 @@ def process_text(raw_text: str, settings: Settings) -> ProcessedText:
                 lambda _match, written=item.written: written, text
             )
 
-    text = re.sub(r"[ \t]+([,.;:!?])", r"\1", text)
-    text = re.sub(r"[ \t]{2,}", " ", text).strip()
-    if text:
-        text = re.sub(
-            r"(^|[.!?]\s+|\n+)([a-z])",
-            lambda match: match.group(1) + match.group(2).upper(),
-            text,
-        )
-    return ProcessedText(text=text, press_enter=press_enter)
+    return ProcessedText(text=_tidy_spacing(text), press_enter=press_enter)

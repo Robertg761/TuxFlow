@@ -60,7 +60,15 @@ def test_missing_recorder_reports_the_install_command_for_the_platform(monkeypat
         audio.create_recorder().start(Path("/tmp/tuxflow-test.wav"))
 
 
-def test_avfoundation_retries_the_numeric_device_when_the_default_is_rejected(tmp_path):
+@pytest.fixture
+def pretend_everything_is_installed(monkeypatch):
+    """Let a test reach the recording logic on a machine without the recorder."""
+    monkeypatch.setattr(audio.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+
+def test_avfoundation_retries_the_numeric_device_when_the_default_is_rejected(
+    tmp_path, pretend_everything_is_installed
+):
     recorder = audio.CommandRecorder(audio.FFMPEG_AVFOUNDATION)
     attempts: list[str] = []
 
@@ -74,7 +82,7 @@ def test_avfoundation_retries_the_numeric_device_when_the_default_is_rejected(tm
     assert attempts == ["", ":0"]
 
 
-def test_a_pinned_device_is_never_silently_replaced(tmp_path):
+def test_a_pinned_device_is_never_silently_replaced(tmp_path, pretend_everything_is_installed):
     recorder = audio.CommandRecorder(audio.FFMPEG_AVFOUNDATION, device=":2")
     attempts: list[str] = []
 

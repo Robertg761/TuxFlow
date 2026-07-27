@@ -146,9 +146,9 @@ log "Writing desktop metadata"
 icons="$APPDIR/usr/share/icons/hicolor/scalable/apps"
 mkdir -p "$APPDIR/usr/share/applications" "$icons"
 sed "s|@TUXFLOW_BIN@|tuxflow|g" \
-  /src/data/io.github.tuxflow.TuxFlow.desktop.in \
+  "$PROJECT_DIR/data/io.github.tuxflow.TuxFlow.desktop.in" \
   >"$APPDIR/usr/share/applications/io.github.tuxflow.TuxFlow.desktop"
-cp /src/data/io.github.tuxflow.TuxFlow.svg "$icons/"
+cp "$PROJECT_DIR/data/io.github.tuxflow.TuxFlow.svg" "$icons/"
 cp "$icons/io.github.tuxflow.TuxFlow.svg" "$APPDIR/"
 cp "$APPDIR/usr/share/applications/io.github.tuxflow.TuxFlow.desktop" "$APPDIR/"
 
@@ -194,7 +194,7 @@ log "Installing TuxFlow and faster-whisper"
   --quiet --break-system-packages \
   --target "$site" \
   --upgrade \
-  "/src[speech]"
+  "${PROJECT_DIR}[speech]"
 
 # --------------------------------------------------------------------------- #
 # Entry point
@@ -242,10 +242,10 @@ chmod +x "$APPDIR/AppRun"
 # --------------------------------------------------------------------------- #
 
 log "Packing the AppImage"
-mkdir -p /src/dist
+mkdir -p "$PROJECT_DIR/dist"
 version="$("/usr/bin/python$PYTHON_VERSION" -c \
-  "import re,pathlib;print(re.search(r'version = \"([^\"]+)\"',pathlib.Path('/src/pyproject.toml').read_text()).group(1))")"
-output="/src/dist/TuxFlow-$version-$ARCH.AppImage"
+  "import re,pathlib;print(re.search(r'version = \"([^\"]+)\"',pathlib.Path('$PROJECT_DIR/pyproject.toml').read_text()).group(1))")"
+output="$PROJECT_DIR/dist/TuxFlow-$version-$ARCH.AppImage"
 
 ARCH="$ARCH" "$TOOLS/appimagetool" "$APPDIR" "$output"
 chmod +x "$output"
